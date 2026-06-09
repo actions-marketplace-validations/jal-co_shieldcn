@@ -79,15 +79,41 @@ export function isBackedOff(provider: string): boolean {
 /**
  * Record a rate limit or server error for a provider.
  * Applies exponential backoff: 15s, 30s, 60s, 120s, 300s.
+ *
+ * Also surfaces a provider alert (Sentry issue) on the request that *starts*
+ * a backoff cycle — when there is no active backoff window. Subsequent
+ * blocked requests within the same window don't re-alert, so this stays
+ * roughly one alert per outage rather than one per request. This is the
+ * single chokepoint every provider funnels rate limits / 5xx through (via
+ * githubFetch, handleUpstreamStatus, or provider-fetch), so adding it here
+ * gives every provider rate-limit alerting, not just GitHub.
+ *
+ * @param provider - provider name (e.g. "github", "npm")
+ * @param status - upstream HTTP status that triggered the backoff, if known
  */
-export function recordBackoff(provider: string): void {
+export function recordBackoff(provider: string, status?: number): void {
   const state = backoff.get(provider)
+  // A new cycle = no backoff state, or the previous window has elapsed.
+  const newCycle = !state || Date.now() >= state.until
   const count = (state?.count ?? 0) + 1
   const delay = Math.min(15000 * Math.pow(2, count - 1), MAX_BACKOFF_MS)
   backoff.set(provider, {
     until: Date.now() + delay,
     count,
   })
+
+  if (newCycle) {
+    reportProviderAlert({
+      provider,
+      reason: status === 503 ? "unavailable" : "rate_limit",
+      status,
+      message: status === 503
+        ? `${provider} API unavailable (503)`
+        : status
+          ? `${provider} API rate limited (${status})`
+          : `${provider} API rate limited`,
+    })
+  }
 }
 
 /**
@@ -269,6 +295,52 @@ export function setCacheMetricsCallback(cb: typeof cacheMetricsCallback): void {
   cacheMetricsCallback = cb
 }
 
+// ---------------------------------------------------------------------------
+// Provider alerts (Sentry issues, not just metrics)
+// ---------------------------------------------------------------------------
+
+/**
+ * A provider-level alert worth surfacing as a Sentry issue (not just a
+ * metric counter). Examples: an upstream rate limit (429), or a badge that
+ * could not be served at all because the upstream failed and there was no
+ * last-known-good value to fall back to.
+ *
+ * `reason` and `message` are kept stable so Sentry groups recurring alerts
+ * into a single issue; `context` carries the variable detail (path, url).
+ */
+export interface ProviderAlert {
+  /** Provider name, e.g. "github". */
+  provider: string
+  /** What went wrong — used for triage and Sentry grouping. */
+  reason: "rate_limit" | "unavailable" | "badge_unavailable"
+  /** HTTP status, when applicable (e.g. 429, 503). */
+  status?: number
+  /** Stable human-readable summary (avoid per-request detail here). */
+  message: string
+  /** Variable context (badge path, url) — not used for grouping. */
+  context?: Record<string, string>
+}
+
+let providerAlertCallback: ((alert: ProviderAlert) => void) | null = null
+
+/**
+ * Register a callback to receive provider alerts. Apps wire this to
+ * Sentry.captureMessage (or any alerting backend); core stays
+ * dependency-free. Call once at app startup.
+ */
+export function setProviderAlertCallback(cb: ((alert: ProviderAlert) => void) | null): void {
+  providerAlertCallback = cb
+}
+
+/** Emit a provider alert. No-op if no callback is registered; never throws. */
+export function reportProviderAlert(alert: ProviderAlert): void {
+  try {
+    providerAlertCallback?.(alert)
+  } catch {
+    // Alerting must never break a badge response.
+  }
+}
+
 export async function cachedFetch<T>(
   provider: string,
   key: string,
@@ -323,11 +395,129 @@ export async function cachedFetch<T>(
     if (err instanceof Response) {
       const status = err.status
       if (status === 429 || status === 503) {
-        recordBackoff(provider)
+        recordBackoff(provider, status)
       }
     }
     return null
   }
+}
+
+/**
+ * Cached provider fetch with last-known-good fallback ("stale on error").
+ *
+ * Unlike {@link cachedFetch}, this keeps two copies of every successful
+ * result:
+ *   - a "fresh" copy with a short TTL (`freshTtl`), and
+ *   - a "stale" copy with a long TTL (`staleTtl`).
+ *
+ * When a fetch fails (returns `null`) or the provider is currently backed
+ * off, the stale copy is served instead of failing. This prevents a
+ * transient upstream blip (429/503, network error, empty token pool) from
+ * collapsing a previously-good badge into a "not found" — the badge keeps
+ * showing its last-known value until the upstream recovers.
+ *
+ * Only non-null results are cached; a genuine miss with no prior good value
+ * still returns `null` (caller decides how to render / cache that).
+ *
+ * A fetched result may be a "terminal error" — a real value that nonetheless
+ * represents a definitive error state (e.g. GitHub 404 → "invalid
+ * repository"). Pass `opts.isError` to mark these: they are cached only
+ * briefly (`opts.errorTtl`) so repeated requests don't re-hit the upstream,
+ * but they are NEVER written to the long-lived stale store and never
+ * overwrite an existing good value — so they self-heal quickly and can't be
+ * served later as a fake last-known-good.
+ *
+ * @param provider - provider name (e.g. "github")
+ * @param key - unique cache key for this request
+ * @param fetcher - async function that fetches the data
+ * @param freshTtl - fresh-copy TTL in seconds (default 300)
+ * @param staleTtl - last-known-good TTL in seconds (default 7 days)
+ * @param opts - optional terminal-error handling
+ */
+export async function cachedFetchStale<T>(
+  provider: string,
+  key: string,
+  fetcher: () => Promise<T | null>,
+  freshTtl: number = 300,
+  staleTtl: number = 60 * 60 * 24 * 7,
+  opts?: { isError?: (data: T) => boolean; errorTtl?: number },
+): Promise<T | null> {
+  const freshKey = cacheKey(provider, key)
+  const staleKey = cacheKey(provider, "stale", key)
+
+  // 1. Fresh cache hit?
+  const fresh = await cacheGet<T>(freshKey)
+  if (fresh !== undefined) {
+    cacheMetricsCallback?.({
+      type: "counter", name: "badge.cache", value: 1,
+      tags: { provider, result: "hit" },
+    })
+    return fresh
+  }
+  cacheMetricsCallback?.({
+    type: "counter", name: "badge.cache", value: 1,
+    tags: { provider, result: "miss" },
+  })
+
+  // Helper: serve last-known-good if we have it, otherwise surface that the
+  // badge could not be served at all (upstream failed and there is no cached
+  // value to fall back to) so it shows up in Sentry rather than silently
+  // rendering "not found".
+  const serveStale = async (): Promise<T | null> => {
+    const stale = await cacheGet<T>(staleKey)
+    if (stale !== undefined) {
+      cacheMetricsCallback?.({
+        type: "counter", name: "badge.cache", value: 1,
+        tags: { provider, result: "stale" },
+      })
+      return stale
+    }
+    reportProviderAlert({
+      provider,
+      reason: "badge_unavailable",
+      message: `${provider} badge unavailable (upstream failed, no cached value)`,
+      context: { key },
+    })
+    return null
+  }
+
+  // 2. Provider backed off — don't hammer it, serve last-known-good.
+  if (isBackedOff(provider)) {
+    cacheMetricsCallback?.({
+      type: "counter", name: "badge.backoff", value: 1,
+      tags: { provider },
+    })
+    return serveStale()
+  }
+
+  // 3. Fetch.
+  let data: T | null = null
+  try {
+    data = await fetcher()
+  } catch (err) {
+    if (err instanceof Response && (err.status === 429 || err.status === 503)) {
+      recordBackoff(provider, err.status)
+    }
+    data = null
+  }
+
+  if (data !== null) {
+    clearBackoff(provider)
+    if (opts?.isError?.(data)) {
+      // Terminal error verdict: cache briefly so we don't re-hit the upstream
+      // on every request, but never persist it as last-known-good and never
+      // clobber an existing good value — so it self-heals fast.
+      await cacheSet(freshKey, data, opts.errorTtl ?? 60)
+    } else {
+      // Good value: refresh both the short-lived and the long-lived copy.
+      await cacheSet(freshKey, data, freshTtl)
+      await cacheSet(staleKey, data, staleTtl)
+    }
+    return data
+  }
+
+  // 4. Fetch failed — fall back to last-known-good rather than failing.
+  return serveStale()
 }
 
 /**
@@ -336,7 +526,7 @@ export async function cachedFetch<T>(
  */
 export function handleUpstreamStatus(provider: string, status: number): void {
   if (status === 429 || status === 503) {
-    recordBackoff(provider)
+    recordBackoff(provider, status)
   } else if (status >= 200 && status < 400) {
     clearBackoff(provider)
   }

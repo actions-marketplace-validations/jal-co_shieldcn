@@ -5,7 +5,7 @@
  * GitHub REST API client. Uses the token pool for distributed rate limiting.
  * Supports: stars, forks, watchers, branches, releases, tags, license,
  *           contributors, checks, issues, PRs, milestones, commits,
- *           last-commit, assets-dl, dependents, dependabot,
+ *           last-commit, assets-dl, dependabot,
  *           followers, user-stars.
  */
 
@@ -29,9 +29,9 @@ async function githubFetch(url: string, revalidate: number = 3600): Promise<Resp
     }
     const response = await fetch(url, { headers, next: { revalidate } })
 
-    // Track rate limits
+    // Track rate limits — recordBackoff also surfaces the Sentry alert.
     if (response.status === 429 || response.status === 503) {
-      recordBackoff("github")
+      recordBackoff("github", response.status)
       return null
     }
 
@@ -94,6 +94,46 @@ async function resolveRepo(owner: string, repo: string): Promise<{ owner: string
   const [o, r] = fullName.split("/")
   if (!o || !r) return null
   return { owner: o, repo: r }
+}
+
+/**
+ * Definitively decide whether a repo exists, so a genuine bad/typo'd repo can
+ * render "invalid repository" instead of a generic transient "not found".
+ *
+ * Returns:
+ *   - `false` — GitHub says the repo does not exist (404)
+ *   - `true`  — the repo exists (2xx)
+ *   - `null`  — couldn't tell (rate limit, backoff, network, other status);
+ *               caller should treat this as transient, not as "invalid"
+ *
+ * Uses a HEAD request (no body) and is only called on the failure path, so it
+ * costs an extra call only when a badge would otherwise have failed.
+ */
+export async function githubRepoExists(owner: string, repo: string): Promise<boolean | null> {
+  if (isBackedOff("github")) return null
+  try {
+    const token = await pickToken()
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      method: "HEAD",
+      headers: {
+        Accept: "application/vnd.github.v3+json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      next: { revalidate: 3600 },
+    })
+    if (response.status === 404) return false
+    if (response.status === 429 || response.status === 503) {
+      recordBackoff("github", response.status)
+      return null
+    }
+    if (response.ok) {
+      clearBackoff("github")
+      return true
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
