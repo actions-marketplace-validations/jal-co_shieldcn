@@ -53,6 +53,7 @@ export const featuredBadges: ShowcaseBadge[] = [
   dynamicBadge("Bundle Size", "featured bundlephobia", "/bundlephobia/minzip/react.svg?variant=secondary", "Show how lightweight your package is.", "/docs/badges/bundlephobia"),
   dynamicBadge("Built in the USA", "featured location", "/flag/us.svg", "Country flag badge with a natural-aspect flag chip.", "/docs/badges/flag"),
   dynamicBadge("Ship It", "featured emoji", "/badge/ship-it.svg?logo=twemoji:\uD83D\uDE80&variant=secondary", "Any emoji as a logo, rendered via Twemoji.", "/docs/customization/logos"),
+  dynamicBadge("Skill Installs", "featured skills.sh", "/skills/installs/vercel-labs/agent-skills/vercel-react-best-practices.svg?variant=branded", "Install count for an agent skill on skills.sh.", "/docs/badges/skills"),
 ]
 
 export const categories: Category[] = [
@@ -205,6 +206,16 @@ export const categories: Category[] = [
       dynamicBadge("WakaTime", "coding stats", "/wakatime/wakatime.svg?variant=branded", "WakaTime coding time badge.", "/docs/badges/wakatime"),
       dynamicBadge("Tokscale Tokens", "ai usage", "/tokscale/tokens/junhoyeo.svg?variant=branded", "Tokscale AI token usage.", "/docs/badges/tokscale"),
       dynamicBadge("Tokscale Rank", "ai usage", "/tokscale/rank/junhoyeo.svg?variant=secondary", "Tokscale leaderboard rank.", "/docs/badges/tokscale"),
+    ],
+  },
+  {
+    name: "Agent Skills",
+    description: "Badges for skills.sh — Vercel's open agent skills directory. Show all-time installs and leaderboard rank for your agent skill.",
+    icons: [
+      dynamicBadge("Skill Installs", "social proof", "/skills/installs/vercel-labs/agent-skills/vercel-react-best-practices.svg?variant=branded", "All-time install count for a skill on skills.sh.", "/docs/badges/skills"),
+      dynamicBadge("Skill Rank", "leaderboard", "/skills/rank/vercel-labs/agent-skills/vercel-react-best-practices.svg?variant=secondary", "Position on the all-time skills.sh leaderboard.", "/docs/badges/skills"),
+      dynamicBadge("Trending Skill", "leaderboard", "/skills/trending/vercel-labs/agent-skills/vercel-react-best-practices.svg?variant=branded", "Position on the trending skills leaderboard.", "/docs/badges/skills"),
+      dynamicBadge("Web Design Guidelines", "social proof", "/skills/installs/vercel-labs/agent-skills/web-design-guidelines.svg?variant=outline", "Installs for another popular Vercel agent skill.", "/docs/badges/skills"),
     ],
   },
   {
