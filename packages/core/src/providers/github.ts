@@ -822,13 +822,30 @@ interface RawSponsorsConnection {
  */
 const SPONSORS_PAGE_CAP = 3
 
+/**
+ * Resolve an account's public sponsors. Prefers the GraphQL list (complete,
+ * with display names + hi-res avatars + an accurate total) when a potentially
+ * scoped token is configured; otherwise falls back to scraping the public
+ * sponsors wall — token-free, but capped at ~50 with login-only names.
+ *
+ * Enumerating `sponsors.nodes` over GraphQL needs the `read:user` scope, which
+ * the donor token pool deliberately lacks. So without `SPONSORS_GITHUB_TOKEN`
+ * (or a scoped `GITHUB_TOKEN`) the GraphQL list comes back empty — the HTML
+ * fallback keeps the feature working with no token at all.
+ */
 export async function getGitHubSponsorsList(login: string): Promise<SponsorsList | null> {
-  // Enumerating sponsor identities (`sponsors.nodes`) requires the `read:user`
-  // scope. The donor token pool is deliberately zero-scope, so it can read the
-  // aggregate `totalCount` (the count badge) but NOT the list. Prefer a
-  // dedicated maintainer token when configured; otherwise fall through to the
-  // pool (which yields no nodes → graceful empty card, never a crash).
   const sponsorToken = process.env.SPONSORS_GITHUB_TOKEN || undefined
+  // Only attempt GraphQL when a potentially-scoped token exists; the zero-scope
+  // pool can't read the node list, so skipping it avoids a doomed call.
+  if (sponsorToken || process.env.GITHUB_TOKEN) {
+    const viaGql = await fetchSponsorsViaGraphQL(login, sponsorToken)
+    if (viaGql && viaGql.sponsors.length > 0) return viaGql
+  }
+  // No usable scoped token — scrape the public sponsors wall instead.
+  return fetchSponsorsViaHtml(login)
+}
+
+async function fetchSponsorsViaGraphQL(login: string, sponsorToken: string | undefined): Promise<SponsorsList | null> {
   const sponsors: SponsorEntry[] = []
   let totalCount = 0
   let after: string | null = null
@@ -868,4 +885,137 @@ export async function getGitHubSponsorsList(login: string): Promise<SponsorsList
 
   if (!resolvedAny) return null
   return { totalCount, sponsors }
+}
+
+/** Bump (or add) the `s=` size param on a GitHub avatar URL. */
+function bumpAvatarSize(url: string, size: number): string {
+  if (/[?&]s=\d+/.test(url)) return url.replace(/([?&]s=)\d+/, `$1${size}`)
+  return url + (url.includes("?") ? "&" : "?") + "s=" + size
+}
+
+/**
+ * Parse the "Current sponsors" wall from a sponsors page's HTML into a
+ * SponsorsList. Token-free, but GitHub caps the public wall at ~50 sponsors and
+ * exposes only logins (no display names). Exported for tests.
+ */
+export function parseSponsorsWall(html: string, login: string): SponsorsList {
+  const lower = html.toLowerCase()
+  const start = lower.indexOf("current sponsors")
+  if (start === -1) return { totalCount: 0, sponsors: [] }
+  const ends = ["past sponsors", "featured work", "</main"]
+    .map((h) => lower.indexOf(h, start + "current sponsors".length))
+    .filter((i) => i > start)
+  const end = ends.length ? Math.min(...ends) : html.length
+  const seg = html.slice(start, end)
+
+  const sponsors: SponsorEntry[] = []
+  const seen = new Set<string>()
+  const self = login.toLowerCase()
+  for (const tag of seg.match(/<img\b[^>]*>/gi) ?? []) {
+    const altMatch = tag.match(/alt="@([A-Za-z0-9-]+)"/)
+    if (!altMatch) continue
+    const l = altMatch[1]
+    const key = l.toLowerCase()
+    if (key === self || seen.has(key)) continue
+    seen.add(key)
+    const srcMatch = tag.match(/src="([^"]+)"/)
+    const rawSrc = srcMatch ? srcMatch[1].replace(/&amp;/g, "&") : `https://github.com/${l}.png`
+    sponsors.push({
+      login: l,
+      name: null, // public HTML exposes the login only, not the display name
+      avatarUrl: bumpAvatarSize(rawSrc, 160),
+      url: `https://github.com/${l}`,
+      type: "User",
+    })
+  }
+  return { totalCount: sponsors.length, sponsors }
+}
+
+async function fetchSponsorsViaHtml(login: string): Promise<SponsorsList | null> {
+  if (!/^[A-Za-z0-9-]+$/.test(login)) return null
+  try {
+    const res = await raceTimeout(
+      fetch(`https://github.com/sponsors/${encodeURIComponent(login)}`, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; shieldcn.dev/1.0; +https://shieldcn.dev)",
+          Accept: "text/html",
+        },
+        next: { revalidate: 1800 },
+      }),
+    )
+    if (!res || !res.ok) return null
+    return parseSponsorsWall(await res.text(), login)
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Featured sponsors (public profile "Featured sponsors" selection)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract the "Featured sponsors" logins from a sponsors page's HTML. The
+ * featured block sits between the "Featured sponsors" heading and the next
+ * section ("Current sponsors" / "Past sponsors" / "Featured work"); each
+ * featured account renders an avatar with an `alt="@login"`. Exported for tests.
+ */
+export function parseFeaturedSponsors(html: string, login: string): string[] {
+  const lower = html.toLowerCase()
+  const start = lower.indexOf("featured sponsors")
+  if (start === -1) return []
+  // Bound the section at the next heading so we don't pull in current/past
+  // sponsors or featured repositories.
+  const ends = ["current sponsors", "past sponsors", "featured work"]
+    .map((h) => lower.indexOf(h, start + "featured sponsors".length))
+    .filter((i) => i > start)
+  const end = ends.length ? Math.min(...ends) : Math.min(start + 8000, html.length)
+  const segment = html.slice(start, end)
+
+  const out: string[] = []
+  const seen = new Set<string>()
+  const self = login.toLowerCase()
+  const re = /alt="@([A-Za-z0-9-]+)"/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(segment)) !== null) {
+    const l = m[1].toLowerCase()
+    // Skip the maintainer's own avatar and de-dupe; cap to a sane row.
+    if (l === self || seen.has(l)) continue
+    seen.add(l)
+    out.push(l)
+    if (out.length >= 12) break
+  }
+  return out
+}
+
+/**
+ * Fetch an account's public "Featured sponsors" — the sponsors the maintainer
+ * hand-picks to highlight on their GitHub Sponsors page. GitHub does NOT expose
+ * this via GraphQL (only featured *repositories* are) and sponsorship *amounts*
+ * are owner-only, so the rendered public page is the only source for an
+ * automatic "featured" tier.
+ *
+ * Best-effort + defensive: any failure (non-200, markup change, network, bad
+ * login) yields an empty list so the grid simply renders without a featured
+ * tier rather than erroring. Needs no token — the page is public HTML.
+ */
+export async function getGitHubFeaturedSponsors(login: string): Promise<string[]> {
+  if (!/^[A-Za-z0-9-]+$/.test(login)) return []
+  try {
+    const res = await raceTimeout(
+      fetch(`https://github.com/sponsors/${encodeURIComponent(login)}`, {
+        headers: {
+          // A browser-ish UA — GitHub serves a degraded page to some agents.
+          "User-Agent": "Mozilla/5.0 (compatible; shieldcn.dev/1.0; +https://shieldcn.dev)",
+          Accept: "text/html",
+        },
+        next: { revalidate: 1800 },
+      }),
+    )
+    if (!res || !res.ok) return []
+    const html = await res.text()
+    return parseFeaturedSponsors(html, login)
+  } catch {
+    return []
+  }
 }
