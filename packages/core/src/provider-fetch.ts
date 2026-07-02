@@ -11,6 +11,7 @@
  */
 
 import { cachedFetch, handleUpstreamStatus } from "./cache"
+import { safeFetch, UnsafeUrlError, ResponseTooLargeError } from "./safe-fetch"
 
 /**
  * Hard cap on upstream latency. A hung upstream must fail fast so the badge
@@ -44,6 +45,15 @@ interface ProviderFetchOptions {
   headers?: HeadersInit
   /** Next.js revalidate value. @default matches ttl */
   revalidate?: number
+  /**
+   * Set when the hostname in `url` was chosen by the badge caller rather than
+   * hardcoded (e.g. Mastodon/Lemmy/Discourse/Matrix/Weblate/Sonar instance
+   * badges). Routes the request through {@link safeFetch} instead of raw
+   * `fetch`, rejecting private/loopback/link-local/metadata addresses (on the
+   * initial host and on every redirect hop) and capping the response size.
+   * Hardcoded-host providers (npm, GitHub, ...) must NOT set this.
+   */
+  userControlledHost?: boolean
 }
 
 /**
@@ -53,20 +63,27 @@ interface ProviderFetchOptions {
 export async function providerFetch<T = Record<string, unknown>>(
   opts: ProviderFetchOptions
 ): Promise<T | null> {
-  const { provider, cacheKey, url, ttl = 300, headers = {}, revalidate } = opts
+  const { provider, cacheKey, url, ttl = 300, headers = {}, revalidate, userControlledHost } = opts
 
   return cachedFetch<T>(
     provider,
     cacheKey,
     async () => {
-      const response = await raceTimeout(fetch(url, {
-        headers: {
-          Accept: "application/json",
-          "User-Agent": "shieldcn/1.0",
-          ...headers,
-        },
-        next: { revalidate: revalidate ?? ttl },
-      }))
+      const requestHeaders = {
+        Accept: "application/json",
+        "User-Agent": "shieldcn/1.0",
+        ...headers,
+      }
+
+      let response: Response | null
+      try {
+        response = userControlledHost
+          ? await raceTimeout(safeFetch(url, { headers: requestHeaders }))
+          : await raceTimeout(fetch(url, { headers: requestHeaders, next: { revalidate: revalidate ?? ttl } }))
+      } catch (err) {
+        if (err instanceof UnsafeUrlError || err instanceof ResponseTooLargeError) return null
+        throw err
+      }
       if (!response) return null
 
       handleUpstreamStatus(provider, response.status)
@@ -90,19 +107,26 @@ export async function providerFetch<T = Record<string, unknown>>(
 export async function providerFetchText(
   opts: ProviderFetchOptions
 ): Promise<string | null> {
-  const { provider, cacheKey, url, ttl = 300, headers = {}, revalidate } = opts
+  const { provider, cacheKey, url, ttl = 300, headers = {}, revalidate, userControlledHost } = opts
 
   return cachedFetch<string>(
     provider,
     cacheKey,
     async () => {
-      const response = await raceTimeout(fetch(url, {
-        headers: {
-          "User-Agent": "shieldcn/1.0",
-          ...headers,
-        },
-        next: { revalidate: revalidate ?? ttl },
-      }))
+      const requestHeaders = {
+        "User-Agent": "shieldcn/1.0",
+        ...headers,
+      }
+
+      let response: Response | null
+      try {
+        response = userControlledHost
+          ? await raceTimeout(safeFetch(url, { headers: requestHeaders }))
+          : await raceTimeout(fetch(url, { headers: requestHeaders, next: { revalidate: revalidate ?? ttl } }))
+      } catch (err) {
+        if (err instanceof UnsafeUrlError || err instanceof ResponseTooLargeError) return null
+        throw err
+      }
       if (!response) return null
 
       handleUpstreamStatus(provider, response.status)
@@ -115,5 +139,41 @@ export async function providerFetchText(
       }
     },
     ttl,
+  )
+}
+
+/**
+ * Coerce an unknown upstream JSON value to a string, or `undefined` if it
+ * isn't one — replaces `value as string` casts on parsed JSON, which lie to
+ * the type checker rather than checking anything. A schema shift upstream
+ * (a field turning into an object/number/null) then surfaces as a missing
+ * value instead of a `"[object Object]"` badge or a malformed fetch URL.
+ */
+export function str(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined
+}
+
+/**
+ * Coerce an unknown upstream JSON value to a finite number, or `undefined`
+ * if it isn't one — replaces `value as number` casts on parsed JSON. See
+ * {@link str}.
+ */
+export function num(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+/**
+ * True when a GitHub API response is a rate limit. GitHub signals primary and
+ * secondary rate limits as 403 (with an exhausted quota header or a
+ * Retry-After), not just 429 — a plain 403 (e.g. a blocked repo) is NOT a
+ * rate limit. Shared by providers/github.ts and providers/starhistory.ts,
+ * both of which hit the GitHub API directly.
+ */
+export function isRateLimitResponse(response: Response): boolean {
+  if (response.status === 429) return true
+  return (
+    response.status === 403 &&
+    (response.headers.get("x-ratelimit-remaining") === "0" ||
+      response.headers.get("retry-after") !== null)
   )
 }

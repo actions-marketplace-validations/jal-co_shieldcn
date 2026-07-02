@@ -1,9 +1,10 @@
-import type { Metadata } from "next"
+import type { Metadata, Viewport } from "next"
 import { Fira_Code, Geist, Sora } from "next/font/google"
 import { NuqsAdapter } from "nuqs/adapters/next/app"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Analytics } from "@/components/analytics"
 import { WebMCP } from "@/components/webmcp"
+import { Toaster } from "@/components/ui/sonner"
 import "./globals.css"
 import { cn } from "@/lib/utils"
 
@@ -86,6 +87,13 @@ export const metadata: Metadata = {
   },
 }
 
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#fcfcfc" },
+    { media: "(prefers-color-scheme: dark)", color: "#000000" },
+  ],
+}
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -101,6 +109,7 @@ export default function RootLayout({
         <NuqsAdapter>
           <ThemeProvider>
             {children}
+            <Toaster />
           </ThemeProvider>
         </NuqsAdapter>
         <Analytics />

@@ -19,6 +19,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ⚠️ Change POSTGRES_PASSWORD (and the matching DATABASE_URL above) before
+  # deploying anywhere reachable beyond your own machine — "shieldcn" is a
+  # placeholder, not a real credential.
   postgres:
     image: postgres:17-alpine
     environment:
@@ -93,25 +96,45 @@ Create a token at [github.com/settings/tokens](https://github.com/settings/token
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
 | `GITHUB_TOKEN` | — | — | GitHub personal access token (5k req/hr) |
 | `GITHUB_OAUTH_CLIENT_ID` | — | — | GitHub OAuth App ID for token pool |
-| `GITHUB_OAUTH_CLIENT_SECRET` | — | — | GitHub OAuth App secret |
+| `GITHUB_OAUTH_CLIENT_SECRET` | — | — | GitHub OAuth App secret. Also used to derive the token pool's encryption key if `TOKEN_ENCRYPTION_KEY` isn't set (see below). |
+| `TOKEN_ENCRYPTION_KEY` | — | — | Encryption key for donated GitHub tokens stored in the pool. Recommended for any real deployment — set this explicitly rather than relying on `GITHUB_OAUTH_CLIENT_SECRET` doubling as the key, since rotating that secret would then also silently break decryption of already-stored tokens. **Required in production**: if neither this nor `GITHUB_OAUTH_CLIENT_SECRET` is set and `NODE_ENV=production`, adding a token to the pool fails loudly rather than encrypting it with a guessable fallback. |
 | `YOUTUBE_API_KEY` | — | — | YouTube Data API v3 key |
+| `TWITCH_CLIENT_ID` | — | — | Twitch application client ID (for `/twitch/*` badges) |
+| `TWITCH_CLIENT_SECRET` | — | — | Twitch application client secret |
 | `UPSTASH_REDIS_REST_URL` | — | — | Upstash Redis URL for persistent cache |
 | `UPSTASH_REDIS_REST_TOKEN` | — | — | Upstash Redis token |
 | `NEXT_PUBLIC_URL` | — | `http://localhost:3000` | Base URL for OAuth callbacks |
+| `NEXT_PUBLIC_SENTRY_DSN` | — | — | Sentry DSN for error monitoring. Leave unset to run without it. |
+| `SENTRY_TRACES_SAMPLE_RATE` | — | `0.1` | Fraction (0–1) of requests traced. Default samples 10% — raise toward `1` only for low-traffic deployments. |
+| `SENTRY_PROFILES_SAMPLE_RATE` | — | `0.1` | Fraction (0–1) of traced requests profiled (server runtime only). |
+| `SHIELDCN_ALLOW_PRIVATE_FETCH` | — | `false` | Set to `true` only if you intentionally want badges (dynamic JSON, `/https`, header logo/image, chart `?url=`, and instance-host providers like Mastodon/Lemmy) to be able to reach private/loopback/link-local/metadata addresses on your network. Unset keeps the SSRF guard fully enforced — enabling this turns the badge route into a proxy into your private network, so only set it if you understand that tradeoff. |
 
 ## Endpoints
 
 ```
-GET /{provider}/{...params}.svg     → SVG badge
-GET /{provider}/{...params}.png     → PNG badge
-GET /{provider}/{...params}.json    → raw JSON data
-GET /api/health/                    → health check
-PUT /memo/{key}/{label}/{value}     → create memo badge
+GET /{provider}/{...params}.svg      → SVG badge
+GET /{provider}/{...params}.png      → PNG badge
+GET /{provider}/{...params}.json     → raw JSON data
+GET /api/health/                     → health check
+PUT /memo/{key}/{label}/{value}      → create memo badge
+POST /api/gen-count                  → increment the badge-generation counter (rate-limited, capped at 100/request)
+GET /api/auth/github                 → start the GitHub OAuth flow for the token pool (see below)
+GET /api/auth/github/callback        → OAuth callback; stores a zero-scope token in the pool
 ```
+
+### GitHub token pool
+
+If you're hitting GitHub's unauthenticated rate limit even with `GITHUB_TOKEN`
+set, visitors can donate their own read-only GitHub token to a shared pool via
+`GET /api/auth/github`. Requires `GITHUB_OAUTH_CLIENT_ID` and
+`GITHUB_OAUTH_CLIENT_SECRET` (see `.env.example`) and, for a real deployment,
+`TOKEN_ENCRYPTION_KEY` (see above). The OAuth app should request no scopes —
+the callback rejects any token GitHub reports as scoped, since the pool only
+ever holds read-only public-data access.
 
 ## Supported Providers
 
-npm, GitHub, PyPI, crates.io, Docker Hub, Discord, Bluesky, JSR, YouTube, VS Code Marketplace, Open Collective, Hacker News, Mastodon, Lemmy, Packagist, RubyGems, NuGet, Pub.dev, Homebrew, Maven, CocoaPods, Codecov, WakaTime, Tokscale, IndieDevs, Reddit, Bundlephobia, and static/dynamic badges.
+npm, GitHub, PyPI, crates.io, Docker Hub, Discord, Bluesky, JSR, YouTube, VS Code Marketplace, Open Collective, Hacker News, Mastodon, Lemmy, Packagist, RubyGems, NuGet, Pub.dev, Homebrew, Maven, CocoaPods, Codecov, WakaTime, Tokscale, IndieDevs, Reddit, Bundlephobia, Twitch (requires `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET`), and static/dynamic badges. See the [full provider list](https://shieldcn.dev/docs/api-reference) — this is a highlight reel, not exhaustive.
 
 ## Upgrading
 

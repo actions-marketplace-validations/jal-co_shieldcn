@@ -8,13 +8,13 @@
 
 import type { BadgeData } from "../badges/types"
 import { formatCount } from "../format"
-import { providerFetch } from "../provider-fetch"
+import { providerFetch, str } from "../provider-fetch"
 
 async function nugetFetch(pkg: string): Promise<Record<string, unknown> | null> {
   return providerFetch({
     provider: "nuget",
     cacheKey: `reg:${pkg}`,
-    url: `https://api.nuget.org/v3/registration5-gz-semver2/${pkg.toLowerCase()}/index.json`,
+    url: `https://api.nuget.org/v3/registration5-gz-semver2/${encodeURIComponent(pkg.toLowerCase())}/index.json`,
     ttl: 3600,
   })
 }
@@ -35,11 +35,12 @@ export async function getNuGetVersion(pkg: string): Promise<BadgeData | null> {
   let pageItems = lastPage.items as Array<Record<string, unknown>> | undefined
 
   // If items aren't inline, fetch the page
-  if (!pageItems && lastPage["@id"]) {
+  const pageUrl = str(lastPage["@id"])
+  if (!pageItems && pageUrl) {
     const page = await providerFetch<Record<string, unknown>>({
       provider: "nuget",
       cacheKey: `page:${pkg}`,
-      url: lastPage["@id"] as string,
+      url: pageUrl,
       ttl: 3600,
     })
     if (page) {
@@ -56,7 +57,7 @@ export async function getNuGetVersion(pkg: string): Promise<BadgeData | null> {
   return {
     label: "nuget",
     value: version ? `v${version}` : "unknown",
-    link: `https://www.nuget.org/packages/${pkg}`,
+    link: `https://www.nuget.org/packages/${encodeURIComponent(pkg)}`,
   }
 }
 
@@ -80,6 +81,6 @@ export async function getNuGetDownloads(pkg: string): Promise<BadgeData | null> 
   return {
     label: "downloads",
     value: formatCount(count),
-    link: `https://www.nuget.org/packages/${pkg}`,
+    link: `https://www.nuget.org/packages/${encodeURIComponent(pkg)}`,
   }
 }

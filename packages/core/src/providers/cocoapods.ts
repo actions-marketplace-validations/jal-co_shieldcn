@@ -33,7 +33,7 @@ export async function getCocoaPodsVersion(pod: string): Promise<BadgeData | null
   return {
     label: "cocoapods",
     value: latest ? `v${latest}` : "unknown",
-    link: `https://cocoapods.org/pods/${pod}`,
+    link: `https://cocoapods.org/pods/${encodeURIComponent(pod)}`,
   }
 }
 
@@ -52,19 +52,6 @@ export async function getCocoaPodsLicense(pod: string): Promise<BadgeData | null
   return {
     label: "license",
     value: "see pod",
-    link: `https://cocoapods.org/pods/${pod}`,
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Platform
-// ---------------------------------------------------------------------------
-
-export async function getCocoaPodsPlatform(pod: string): Promise<BadgeData | null> {
-  // CocoaPods trunk API returns version info; platform is in the podspec
-  return {
-    label: "platform",
-    value: "ios | macos",
-    link: `https://cocoapods.org/pods/${pod}`,
+    link: `https://cocoapods.org/pods/${encodeURIComponent(pod)}`,
   }
 }

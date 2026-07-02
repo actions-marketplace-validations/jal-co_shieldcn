@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+        env:
+          # Raises the unauthenticated GitHub API rate limit for build-time
+          # SSG fetches (e.g. app/sponsor/page.tsx stargazers list).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Test
+        run: pnpm test
+
+      - name: Typecheck (cli, engine)
+        run: pnpm typecheck
+
+      # Hard gate: the pre-existing React Compiler lint debt was paid down in
+      # PR-5.11 (P17), so lint failures now block CI.
+      - name: Lint
+        run: pnpm lint

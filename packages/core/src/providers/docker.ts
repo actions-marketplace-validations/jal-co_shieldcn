@@ -8,7 +8,7 @@
 
 import type { BadgeData } from "../badges/types"
 import { formatCount } from "../format"
-import { providerFetch } from "../provider-fetch"
+import { providerFetch, num } from "../provider-fetch"
 
 async function dockerFetch(url: string, key: string): Promise<Record<string, unknown> | null> {
   return providerFetch({ provider: "docker", cacheKey: key, url, ttl: 3600 })
@@ -20,9 +20,12 @@ function repoUrl(image: string): string {
 
 /**
  * Normalize image name: if no slash, prefix "library/" for official images.
+ * Each path segment is percent-encoded individually so the "/" separator
+ * between namespace and repo name is preserved.
  */
 function normalizeImage(image: string): string {
-  return image.includes("/") ? image : `library/${image}`
+  const withNamespace = image.includes("/") ? image : `library/${image}`
+  return withNamespace.split("/").map(encodeURIComponent).join("/")
 }
 
 // ---------------------------------------------------------------------------
@@ -84,11 +87,11 @@ export async function getDockerVersion(image: string): Promise<BadgeData | null>
 export async function getDockerSize(image: string, tag: string = "latest"): Promise<BadgeData | null> {
   const normalized = normalizeImage(image)
   const data = await dockerFetch(
-    `https://hub.docker.com/v2/repositories/${normalized}/tags/${tag}`, `size:${normalized}:${tag}`
+    `https://hub.docker.com/v2/repositories/${normalized}/tags/${encodeURIComponent(tag)}`, `size:${normalized}:${tag}`
   )
   if (!data) return null
 
-  const size = data.full_size as number | undefined
+  const size = num(data.full_size)
   if (!size) return null
 
   const mb = (size / 1024 / 1024).toFixed(1)

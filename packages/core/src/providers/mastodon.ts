@@ -8,7 +8,7 @@
 
 import type { BadgeData } from "../badges/types"
 import { formatCount } from "../format"
-import { providerFetch } from "../provider-fetch"
+import { providerFetch, str, num } from "../provider-fetch"
 
 async function mastodonFetch(instance: string, acct: string): Promise<Record<string, unknown> | null> {
   return providerFetch({
@@ -16,6 +16,7 @@ async function mastodonFetch(instance: string, acct: string): Promise<Record<str
     cacheKey: `profile:${instance}:${acct}`,
     url: `https://${instance}/api/v1/accounts/lookup?acct=${encodeURIComponent(acct)}`,
     ttl: 3600,
+    userControlledHost: true,
   })
 }
 
@@ -27,11 +28,11 @@ export async function getMastodonFollowers(instance: string, acct: string): Prom
   const data = await mastodonFetch(instance, acct)
   if (!data) return null
 
-  const count = (data.followers_count as number) ?? 0
+  const count = num(data.followers_count) ?? 0
   return {
     label: "mastodon",
     value: `${formatCount(count)} followers`,
-    link: data.url as string || `https://${instance}/@${acct}`,
+    link: str(data.url) || `https://${instance}/@${encodeURIComponent(acct)}`,
   }
 }
 
@@ -43,11 +44,11 @@ export async function getMastodonFollowing(instance: string, acct: string): Prom
   const data = await mastodonFetch(instance, acct)
   if (!data) return null
 
-  const count = (data.following_count as number) ?? 0
+  const count = num(data.following_count) ?? 0
   return {
     label: "mastodon",
     value: `${formatCount(count)} following`,
-    link: data.url as string || `https://${instance}/@${acct}`,
+    link: str(data.url) || `https://${instance}/@${encodeURIComponent(acct)}`,
   }
 }
 
@@ -59,10 +60,10 @@ export async function getMastodonPosts(instance: string, acct: string): Promise<
   const data = await mastodonFetch(instance, acct)
   if (!data) return null
 
-  const count = (data.statuses_count as number) ?? 0
+  const count = num(data.statuses_count) ?? 0
   return {
     label: "mastodon",
     value: `${formatCount(count)} posts`,
-    link: data.url as string || `https://${instance}/@${acct}`,
+    link: str(data.url) || `https://${instance}/@${encodeURIComponent(acct)}`,
   }
 }

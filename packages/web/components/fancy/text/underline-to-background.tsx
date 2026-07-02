@@ -1,7 +1,7 @@
 "use client"
 
-import { ElementType, useEffect, useMemo, useRef } from "react"
-import { motion, ValueAnimationTransition } from "motion/react"
+import { useEffect, useRef } from "react"
+import { motion, useReducedMotion, ValueAnimationTransition } from "motion/react"
 
 import { cn } from "@/lib/utils"
 
@@ -10,12 +10,6 @@ interface UnderlineProps {
    * The content to be displayed and animated
    */
   children: React.ReactNode
-
-  /**
-   * HTML Tag to render the component as
-   * @default span
-   */
-  as?: ElementType
 
   /**
    * Optional class name for styling
@@ -48,7 +42,6 @@ interface UnderlineProps {
 
 const UnderlineToBackground = ({
   children,
-  as,
   className,
   transition = { type: "spring", damping: 30, stiffness: 300 },
   underlineHeightRatio = 0.1, // Default to 10% of font size
@@ -57,9 +50,13 @@ const UnderlineToBackground = ({
   ...props
 }: UnderlineProps) => {
   const textRef = useRef<HTMLSpanElement>(null)
+  const reduce = useReducedMotion()
+  const appliedTransition = reduce ? { duration: 0 } : transition
 
-  // Create custom motion component based on the 'as' prop
-  const MotionComponent = useMemo(() => motion.create(as ?? "span"), [as])
+  // Renders as a motion <span>. (Previously supported a dynamic `as` tag via
+  // motion.create(), but that creates a component during render — which React
+  // Compiler forbids — and no caller ever overrode the span default.)
+  const MotionComponent = motion.span
 
   // Update CSS custom properties based on font size
   useEffect(() => {
@@ -92,7 +89,7 @@ const UnderlineToBackground = ({
     },
     target: {
       height: "100%",
-      transition: transition,
+      transition: appliedTransition,
     },
   }
 
@@ -103,7 +100,7 @@ const UnderlineToBackground = ({
     },
     target: {
       color: targetTextColor,
-      transition: transition,
+      transition: appliedTransition,
     },
   }
 

@@ -26,6 +26,7 @@ export async function getMatrixMembers(
     cacheKey: `alias:${server}:${roomAlias}`,
     url: `https://${server}/_matrix/client/v3/directory/room/${encodeURIComponent(`#${roomAlias}:${server}`)}`,
     ttl: 3600,
+    userControlledHost: true,
   })
 
   // Fallback: try without server suffix in the alias (user might provide full alias)
@@ -62,6 +63,7 @@ async function fetchRoomMembers(
     cacheKey: `summary:${server}:${roomId}`,
     url: `https://${server}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/joined_members`,
     ttl: 3600,
+    userControlledHost: true,
   })
 
   if (summaryData) {
@@ -71,7 +73,7 @@ async function fetchRoomMembers(
       return {
         label: "matrix",
         value: `${formatCount(count)} members`,
-        link: `https://matrix.to/#/#${roomAlias}:${server}`,
+        link: `https://matrix.to/#/#${encodeURIComponent(roomAlias)}:${server}`,
       }
     }
   }
@@ -80,6 +82,6 @@ async function fetchRoomMembers(
   return {
     label: "matrix",
     value: "join",
-    link: `https://matrix.to/#/#${roomAlias}:${server}`,
+    link: `https://matrix.to/#/#${encodeURIComponent(roomAlias)}:${server}`,
   }
 }

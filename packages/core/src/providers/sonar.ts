@@ -23,6 +23,7 @@ async function sonarFetch(
     cacheKey: `${server}:${component}:${metricKeys}`,
     url: `https://${server}/api/measures/component?component=${encodeURIComponent(component)}&metricKeys=${metricKeys}`,
     ttl: 3600,
+    userControlledHost: true,
   })
 }
 
@@ -62,6 +63,7 @@ export async function getSonarQualityGate(component: string, server?: string): P
     cacheKey: `qg:${server ?? "sonarcloud.io"}:${component}`,
     url: `https://${server ?? "sonarcloud.io"}/api/qualitygates/project_status?projectKey=${encodeURIComponent(component)}`,
     ttl: 3600,
+    userControlledHost: true,
   })
   if (!data) return null
 
@@ -72,7 +74,7 @@ export async function getSonarQualityGate(component: string, server?: string): P
     label: "quality gate",
     value: status === "OK" ? "passed" : status === "ERROR" ? "failed" : status ?? "unknown",
     color: status === "OK" ? "green" : status === "ERROR" ? "red" : undefined,
-    link: `https://${server ?? "sonarcloud.io"}/dashboard?id=${component}`,
+    link: `https://${server ?? "sonarcloud.io"}/dashboard?id=${encodeURIComponent(component)}`,
   }
 }
 
@@ -89,7 +91,7 @@ export async function getSonarBugs(component: string, server?: string): Promise<
   return {
     label: "bugs",
     value: formatCount(value),
-    link: `https://${server ?? "sonarcloud.io"}/project/issues?id=${component}&resolved=false&types=BUG`,
+    link: `https://${server ?? "sonarcloud.io"}/project/issues?id=${encodeURIComponent(component)}&resolved=false&types=BUG`,
   }
 }
 
@@ -106,7 +108,7 @@ export async function getSonarVulnerabilities(component: string, server?: string
   return {
     label: "vulnerabilities",
     value: formatCount(value),
-    link: `https://${server ?? "sonarcloud.io"}/project/issues?id=${component}&resolved=false&types=VULNERABILITY`,
+    link: `https://${server ?? "sonarcloud.io"}/project/issues?id=${encodeURIComponent(component)}&resolved=false&types=VULNERABILITY`,
   }
 }
 
@@ -123,7 +125,7 @@ export async function getSonarCodeSmells(component: string, server?: string): Pr
   return {
     label: "code smells",
     value: formatCount(value),
-    link: `https://${server ?? "sonarcloud.io"}/project/issues?id=${component}&resolved=false&types=CODE_SMELL`,
+    link: `https://${server ?? "sonarcloud.io"}/project/issues?id=${encodeURIComponent(component)}&resolved=false&types=CODE_SMELL`,
   }
 }
 
@@ -147,7 +149,7 @@ export async function getSonarCoverage(component: string, server?: string): Prom
     label: "coverage",
     value: `${pct}%`,
     color,
-    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${component}&metric=coverage`,
+    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${encodeURIComponent(component)}&metric=coverage`,
   }
 }
 
@@ -164,7 +166,7 @@ export async function getSonarDuplicatedLines(component: string, server?: string
   return {
     label: "duplicated lines",
     value: `${value}%`,
-    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${component}&metric=duplicated_lines_density`,
+    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${encodeURIComponent(component)}&metric=duplicated_lines_density`,
   }
 }
 
@@ -184,7 +186,7 @@ export async function getSonarMaintainability(component: string, server?: string
     label: "maintainability",
     value: letter,
     color: ratingColor(letter),
-    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${component}&metric=sqale_rating`,
+    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${encodeURIComponent(component)}&metric=sqale_rating`,
   }
 }
 
@@ -204,7 +206,7 @@ export async function getSonarReliability(component: string, server?: string): P
     label: "reliability",
     value: letter,
     color: ratingColor(letter),
-    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${component}&metric=reliability_rating`,
+    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${encodeURIComponent(component)}&metric=reliability_rating`,
   }
 }
 
@@ -224,6 +226,6 @@ export async function getSonarSecurity(component: string, server?: string): Prom
     label: "security",
     value: letter,
     color: ratingColor(letter),
-    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${component}&metric=security_rating`,
+    link: `https://${server ?? "sonarcloud.io"}/component_measures?id=${encodeURIComponent(component)}&metric=security_rating`,
   }
 }

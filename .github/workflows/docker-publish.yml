@@ -1,9 +1,34 @@
 name: Publish Engine Docker Image
 
+# NOTE on action pinning: actions are referenced by major-version tag and kept
+# current by Dependabot (see .github/dependabot.yml, github-actions ecosystem).
+# Converting these to verified commit-SHA pins should be done with a resolver
+# tool that fetches + checks each SHA against the upstream (e.g. `pinact`), not
+# by hand — an unverified SHA is a worse footgun than a Dependabot-watched tag.
+
 on:
   push:
     tags: ["engine@*"]
+  # Build (but never push) on PRs that touch the image, so a broken Dockerfile
+  # or dependency is caught in review instead of at release time (B13).
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/engine/**"
+      - "packages/core/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/docker-publish.yml"
   workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version tag to publish (e.g. 1.2.3). Required for manual runs.
+          The "latest" tag is only ever applied on a real engine@* tag push,
+          never on a manual dispatch — a manual run from an arbitrary branch
+          must not be able to overwrite what "latest" points at.
+        required: true
+        type: string
 
 jobs:
   build-and-push:
@@ -11,28 +36,65 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Required for SLSA build provenance attestation on pushed images.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
+      # QEMU enables cross-building the linux/arm64 image on an amd64 runner —
+      # ARM self-hosters previously had no runnable image.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      # Only a real release pushes to the registry. PR builds validate the
+      # Dockerfile end-to-end without publishing anything.
+      - name: Decide whether this run pushes
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from tag
+      - name: Resolve tags for this run
         id: version
-        run: echo "version=${GITHUB_REF_NAME#engine@}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#engine@}"
+            {
+              echo "tags<<EOF"
+              echo "ghcr.io/${{ github.repository }}/engine:latest"
+              echo "ghcr.io/${{ github.repository }}/engine:${version}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tags=ghcr.io/${{ github.repository }}/engine:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # PR build — tag is local-only (never pushed), just needs to be valid.
+            echo "tags=ghcr.io/${{ github.repository }}/engine:pr-${{ github.event.number }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: packages/engine/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}/engine:latest
-            ghcr.io/${{ github.repository }}/engine:${{ steps.version.outputs.version }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.mode.outputs.push }}
+          tags: ${{ steps.version.outputs.tags }}
+          # SBOM + SLSA provenance attestations, attached to the pushed image
+          # (skipped for PR builds since nothing is published).
+          sbom: ${{ steps.mode.outputs.push }}
+          provenance: ${{ steps.mode.outputs.push == 'true' && 'mode=max' || 'false' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -17,9 +17,6 @@
 import * as React from "react"
 import satori from "satori"
 import { optimize } from "svgo"
-import { readFileSync } from "node:fs"
-import { join, dirname } from "node:path"
-import { fileURLToPath } from "node:url"
 import type { BadgeConfig } from "./types"
 import { animateSvg } from "./animate"
 import {
@@ -29,57 +26,12 @@ import {
   getButtonSize,
   type ModeColors,
 } from "./button-tokens"
+import { getFonts, FONT_CONFIG, type BadgeFont } from "./satori-fonts"
 
-// Pre-load all font files
-// Try multiple paths to find fonts — Vercel, Docker standalone, and local dev
-// all resolve import.meta.url and process.cwd() differently.
-import { existsSync } from "node:fs"
-
-function findFontsDir(): string {
-  const candidates = [
-    // 1. Relative to this file via import.meta.url (works in Docker standalone)
-    join(dirname(fileURLToPath(import.meta.url)), "..", "fonts"),
-    // 2. In packages/core/src/fonts relative to cwd (works in local dev / Vercel)
-    join(process.cwd(), "packages", "core", "src", "fonts"),
-    // 3. Relative to cwd when cwd is packages/web (Vercel with root=packages/web)
-    join(process.cwd(), "..", "core", "src", "fonts"),
-    // 4. Legacy path (pre-monorepo)
-    join(process.cwd(), "lib", "fonts"),
-  ]
-  for (const dir of candidates) {
-    if (existsSync(join(dir, "inter-medium.ttf"))) return dir
-  }
-  throw new Error(`Could not find font files. Searched: ${candidates.join(", ")}`)
-}
-
-const fontsDir = findFontsDir()
-const interData = readFileSync(join(fontsDir, "inter-medium.ttf"))
-const geistData = readFileSync(join(fontsDir, "geist-medium.ttf"))
-const geistMonoData = readFileSync(join(fontsDir, "geist-mono-medium.ttf"))
-const jetbrainsMonoData = readFileSync(join(fontsDir, "jetbrains-mono-medium.ttf"))
-const firaCodeData = readFileSync(join(fontsDir, "fira-code-medium.ttf"))
-const robotoData = readFileSync(join(fontsDir, "roboto-medium.ttf"))
-const spaceGroteskData = readFileSync(join(fontsDir, "space-grotesk-medium.ttf"))
-
-export type BadgeFont = "inter" | "geist" | "geist-mono" | "jetbrains-mono" | "fira-code" | "roboto" | "space-grotesk"
-
-const FONT_CONFIG: Record<BadgeFont, { name: string; data: Buffer }> = {
-  inter: { name: "Inter", data: interData },
-  geist: { name: "Geist", data: geistData },
-  "geist-mono": { name: "Geist Mono", data: geistMonoData },
-  "jetbrains-mono": { name: "JetBrains Mono", data: jetbrainsMonoData },
-  "fira-code": { name: "Fira Code", data: firaCodeData },
-  roboto: { name: "Roboto", data: robotoData },
-  "space-grotesk": { name: "Space Grotesk", data: spaceGroteskData },
-}
-
-function getFonts(font: BadgeFont = "inter") {
-  const f = FONT_CONFIG[font] ?? FONT_CONFIG.inter
-  return [{ name: f.name, data: f.data, weight: 500 as const, style: "normal" as const }]
-}
+export type { BadgeFont }
 
 /** Relative luminance of a hex color (0 = black, 1 = white). */
-function luminance(hex: string): number {
+export function luminance(hex: string): number {
   const h = hex.replace("#", "")
   const r = parseInt(h.substring(0, 2), 16)
   const g = parseInt(h.substring(2, 4), 16)
@@ -154,7 +106,7 @@ function ensureLightModeContrast(hex: string): string {
 }
 
 /** Hex → rgba with baked-in opacity */
-function rgba(hex: string, opacity: number): string {
+export function rgba(hex: string, opacity: number): string {
   if (opacity >= 1) return hex
   if (hex === "transparent") return "transparent"
   const h = hex.replace("#", "")
@@ -250,6 +202,33 @@ export function sanitizeBadgeText(input: unknown): string {
   return s.length > MAX_TEXT_LENGTH ? `${s.slice(0, MAX_TEXT_LENGTH - 1)}…` : s
 }
 
+/**
+ * Sane [min, max] ranges for renderer dimension overrides. The route layer
+ * (route-handler.ts) clamps these against the same bounds before building a
+ * `BadgeConfig`, but that's caller discipline, not a guarantee — a future
+ * endpoint or a direct `renderBadge()` caller could pass `height: 1e9`
+ * straight through. Clamping again here, right before Satori sees the
+ * values, means the renderer can't be crashed or made to balloon regardless
+ * of what called it.
+ */
+export const BADGE_DIM_BOUNDS: Record<string, [number, number]> = {
+  labelOpacity: [0, 1],
+  height: [8, 240],
+  fontSize: [5, 120],
+  radius: [0, 120],
+  padX: [0, 120],
+  iconSize: [0, 120],
+  gap: [0, 60],
+  labelGap: [0, 60],
+}
+
+/** Clamp `value` into `BADGE_DIM_BOUNDS[key]` (default `[0, 1000]` for unlisted keys). */
+export function clampBadgeDim(key: string, value: number): number {
+  if (!Number.isFinite(value)) return BADGE_DIM_BOUNDS[key]?.[0] ?? 0
+  const [min, max] = BADGE_DIM_BOUNDS[key] ?? [0, 1000]
+  return Math.min(max, Math.max(min, value))
+}
+
 function resolve(config: BadgeConfig): ResolvedBadge {
   const mode = config.mode === "light" ? lightMode : darkMode
   const bs = getButtonStyle(config.style, mode, config.brandColor)
@@ -260,15 +239,18 @@ function resolve(config: BadgeConfig): ResolvedBadge {
   const font = config.font ?? "inter"
   const fontFamily = FONT_CONFIG[font]?.name ?? FONT_CONFIG.inter.name
 
-  const height = config.height ?? bz.height
-  const paddingX = config.padX ?? bz.paddingX
-  const fontSize = config.fontSize ?? bz.fontSize
-  const gap = config.gap ?? bz.gap
-  const iconSize = config.iconSize ?? bz.iconSize
-  const labelGap = config.labelGap ?? gap
+  // Clamped regardless of whether the value came from a caller override or
+  // a size preset — presets are already in-bounds, so this is a no-op for
+  // them and a hard guardrail for overrides (see BADGE_DIM_BOUNDS above).
+  const height = clampBadgeDim("height", config.height ?? bz.height)
+  const paddingX = clampBadgeDim("padX", config.padX ?? bz.paddingX)
+  const fontSize = clampBadgeDim("fontSize", config.fontSize ?? bz.fontSize)
+  const gap = clampBadgeDim("gap", config.gap ?? bz.gap)
+  const iconSize = clampBadgeDim("iconSize", config.iconSize ?? bz.iconSize)
+  const labelGap = clampBadgeDim("labelGap", config.labelGap ?? gap)
   // Gradient badges need higher label opacity for readability — semi-transparent
   // text on colored backgrounds kills contrast far more than on solid dark/light bg
-  const labelOpacity = config.labelOpacity ?? (config.gradient ? 0.9 : 0.7)
+  const labelOpacity = clampBadgeDim("labelOpacity", config.labelOpacity ?? (config.gradient ? 0.9 : 0.7))
 
   // --- Resolve colors ---
   const isFilled = bs.bg !== "transparent"
@@ -399,16 +381,35 @@ function resolve(config: BadgeConfig): ResolvedBadge {
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * Marks a config built internally by `renderErrorBadge` so `renderBadge`'s
+ * catch block doesn't recurse into it again on a second failure — a config
+ * this plain (no icon, no dimension overrides) failing Satori means Satori
+ * itself is broken, not the input, so the second failure should propagate
+ * instead of looping.
+ */
+const ERROR_FALLBACK_MARKER = Symbol("errorFallback")
+
 export async function renderBadge(config: BadgeConfig): Promise<string> {
-  const r = resolve(config)
-  const el = r.split ? renderSplit(r) : renderSingle(r)
-  const fonts = getFonts(config.font)
-  const raw = await satori(el, { height: r.height, fonts })
-  const svg = rgbaToHexOpacity(inlineDataUriImages(raw))
-  const optimized = optimizeSvg(svg)
-  const mode = config.animate ?? "none"
-  if (mode === "none") return optimized
-  return animateSvg(optimized, mode, r.dotColor)
+  try {
+    const r = resolve(config)
+    const el = r.split ? renderSplit(r) : renderSingle(r)
+    const fonts = getFonts(config.font)
+    const raw = await satori(el, { height: r.height, fonts })
+    const svg = rgbaToHexOpacity(inlineDataUriImages(raw))
+    const optimized = optimizeSvg(svg)
+    const mode = config.animate ?? "none"
+    if (mode === "none") return optimized
+    return animateSvg(optimized, mode, r.dotColor)
+  } catch (err) {
+    // Malformed upstream data (e.g. invalid custom icon path syntax) can make
+    // Satori throw instead of yielding a merely-ugly SVG. Route-handler.ts
+    // has its own catch-all today, but callers of this exported function
+    // shouldn't have to duplicate that discipline — degrade to a plain error
+    // badge here so a single bad badge can never become an unhandled 500.
+    if ((config as unknown as Record<PropertyKey, unknown>)[ERROR_FALLBACK_MARKER]) throw err
+    return renderErrorBadge("error", "render failed")
+  }
 }
 
 /**
@@ -419,12 +420,17 @@ export async function renderBadge(config: BadgeConfig): Promise<string> {
 export async function renderBadgeBase(
   config: BadgeConfig,
 ): Promise<{ svg: string; dotColor?: string }> {
-  const r = resolve(config)
-  const el = r.split ? renderSplit(r) : renderSingle(r)
-  const fonts = getFonts(config.font)
-  const raw = await satori(el, { height: r.height, fonts })
-  const svg = optimizeSvg(rgbaToHexOpacity(inlineDataUriImages(raw)))
-  return { svg, dotColor: r.dotColor }
+  try {
+    const r = resolve(config)
+    const el = r.split ? renderSplit(r) : renderSingle(r)
+    const fonts = getFonts(config.font)
+    const raw = await satori(el, { height: r.height, fonts })
+    const svg = optimizeSvg(rgbaToHexOpacity(inlineDataUriImages(raw)))
+    return { svg, dotColor: r.dotColor }
+  } catch (err) {
+    if ((config as unknown as Record<PropertyKey, unknown>)[ERROR_FALLBACK_MARKER]) throw err
+    return { svg: await renderErrorBadge("error", "render failed"), dotColor: undefined }
+  }
 }
 
 /**
@@ -615,12 +621,14 @@ function rgbaToHexOpacity(svg: string): string {
 }
 
 export async function renderErrorBadge(label: string, message: string): Promise<string> {
-  return renderBadge({
+  const config: BadgeConfig & Record<PropertyKey, unknown> = {
     label: label || "error",
     value: message,
     style: "destructive",
     colors: { labelBg: "#18181b", labelFg: "#a1a1aa", valueBg: "#dc2626", valueFg: "#ffffff", border: "#27272a" },
-  })
+  }
+  config[ERROR_FALLBACK_MARKER] = true
+  return renderBadge(config)
 }
 
 // ---------------------------------------------------------------------------

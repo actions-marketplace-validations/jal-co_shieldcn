@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useId, useMemo, useSyncExternalStore } from "react"
 import { Copy, Check } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ColorInput } from "@/components/color-input"
@@ -164,9 +165,13 @@ export function ChartSandbox({ kind: initialKind = "stars", defaults = {} }: Cha
 
   const handleCopy = useCallback(() => {
     if (!formattedOutput) return
-    navigator.clipboard.writeText(formattedOutput)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    navigator.clipboard.writeText(formattedOutput).then(
+      () => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      },
+      () => toast.error("Couldn't copy to clipboard"),
+    )
   }, [formattedOutput])
 
   return (
@@ -292,7 +297,7 @@ export function ChartSandbox({ kind: initialKind = "stars", defaults = {} }: Cha
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <SField label="icon"><LogoPicker value={icon} onChange={setIcon} /></SField>
+          <SField label="icon"><LogoPicker value={icon} onChange={setIcon} ariaLabel="Chart icon" /></SField>
           <SField label="title"><Input id={`${id}-title`} value={title} onChange={e => setTitle(e.target.value)} placeholder="auto" /></SField>
           <SField label="flags">
             <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1.5">

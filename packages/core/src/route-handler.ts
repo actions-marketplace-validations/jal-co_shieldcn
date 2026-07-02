@@ -6,7 +6,7 @@
  * self-hosted engine. Handles GET (badge rendering) and PUT (memo badges).
  */
 
-import { renderBadge, renderBadgeBase, renderErrorBadge } from "./badges/render"
+import { renderBadge, renderBadgeBase, renderErrorBadge, clampBadgeDim } from "./badges/render"
 import { renderChart, resolveAccent, resolveFontFamily, type ChartSeries, type ChartPoint } from "./badges/render-chart"
 import { renderHeader, type HeaderLogoInput } from "./badges/render-header"
 import { renderSponsors, type SponsorAvatar, type SponsorTier } from "./badges/render-sponsors"
@@ -148,7 +148,7 @@ import { getPubVersion, getPubLikes, getPubPoints, getPubPopularity } from "./pr
 import { getHomebrewVersion, getHomebrewCaskVersion, getHomebrewInstalls, getHomebrewFormulaDownloads, getHomebrewCaskDownloads } from "./providers/homebrew"
 import { getMavenVersion } from "./providers/maven"
 import { getCocoaPodsVersion } from "./providers/cocoapods"
-// import { getTwitchStatus, getTwitchFollowers } from "./providers/twitch" // disabled: needs TWITCH_CLIENT_ID + TWITCH_CLIENT_SECRET
+import { getTwitchStatus, getTwitchFollowers } from "./providers/twitch"
 import { getCodecovCoverage } from "./providers/codecov"
 import { getWakaTimeCodingTime } from "./providers/wakatime"
 import { getTokscaleTokens, getTokscaleCost, getTokscaleRank, getTokscaleActiveDays, getTokscaleStats } from "./providers/tokscale"
@@ -173,8 +173,10 @@ import { getLiberapayReceiving, getLiberapayPatrons, getLiberapayGoal } from "./
 import { getMatrixMembers } from "./providers/matrix"
 import { getWeblateTranslation, getWeblateLanguages } from "./providers/weblate"
 import { getShipperClubMember } from "./providers/shipperclub"
-import { cachedFetchStale, isBackedOff } from "./cache"
+import { cachedFetchStale, cachedFetch, isBackedOff } from "./cache"
 import { raceTimeout } from "./provider-fetch"
+import { safeFetch, UnsafeUrlError, ResponseTooLargeError } from "./safe-fetch"
+import { checkRateLimit, getClientIdentifier } from "./rate-limit"
 
 /** Response format. */
 type Format = "svg" | "png" | "gif" | "json" | "shields"
@@ -511,7 +513,6 @@ async function fetchBadgeData(
       const npmTopics = new Set(["v", "dw", "dm", "dy", "dt", "license", "node", "types", "dependents"])
       if (npmTopics.has(rest[0])) {
         const topic = rest[0]
-        const pkg = rest.slice(1, rest.length - (rest.length > 2 && !rest[rest.length - 1].includes("@") && rest[rest.length - 1] !== rest[1] ? 0 : 0)).join("/")
         // Handle scoped packages: /npm/v/@scope/pkg or /npm/v/@scope/pkg/tag
         let pkgName: string
         let tag: string | undefined
@@ -598,7 +599,7 @@ async function fetchBadgeData(
       // resolveGitHubBadge never got a chance to run — produce it here so a
       // brand-new badge during an outage reads "unavailable" (gray, 60s),
       // not "not found" (red, implies the badge URL is wrong).
-      if (isBackedOff("github")) return GITHUB_UNAVAILABLE
+      if (await isBackedOff("github")) return GITHUB_UNAVAILABLE
       return null
     }
 
@@ -1077,16 +1078,25 @@ async function fetchBadgeData(
 
     // /twitch/{topic}/{login}
     // e.g. /twitch/status/shroud or /twitch/followers/ninja
-    // Disabled: requires TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET
-    // case "twitch": {
-    //   const rest = segments.slice(1)
-    //   if (rest.length < 2) return null
-    //   switch (rest[0]) {
-    //     case "status": return getTwitchStatus(rest[1])
-    //     case "followers": return getTwitchFollowers(rest[1])
-    //     default: return getTwitchStatus(rest[0])
-    //   }
-    // }
+    // e.g. /twitch/shroud → status (default)
+    // Requires TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET — providers/twitch.ts
+    // returns null gracefully (same as any other misconfigured provider) when
+    // those aren't set, so this is safe to route unconditionally.
+    case "twitch": {
+      const rest = segments.slice(1)
+      if (rest.length === 0) return null
+
+      const twitchTopics = new Set(["status", "followers"])
+      if (twitchTopics.has(rest[0]) && rest[1]) {
+        switch (rest[0]) {
+          case "status": return getTwitchStatus(rest[1])
+          case "followers": return getTwitchFollowers(rest[1])
+          default: return null
+        }
+      }
+
+      return getTwitchStatus(rest[0])
+    }
 
     // /codecov/{service}/{owner}/{repo}[/{branch}]
     // e.g. /codecov/github/codecov/codecov-cli
@@ -1489,40 +1499,51 @@ async function fetchBadgeData(
       if (rest.length === 0) return null
       const endpointUrl = `https://${rest.join("/")}`
 
-      try {
-        const response = await raceTimeout(fetch(endpointUrl, {
-          headers: { Accept: "application/json", "User-Agent": "shieldcn/1.0" },
-          next: { revalidate: 300 },
-        }))
-        // Failure verdicts carry `error: true` so they get short error cache
-        // headers and self-heal instead of being pinned at the CDN like a
-        // success.
-        if (!response) {
-          return { label: "endpoint", value: "timeout", color: "red", error: true }
-        }
-        if (!response.ok) {
-          return { label: "endpoint", value: `${response.status}`, color: "red", error: true }
-        }
-        const data = await response.json()
+      // Cached + backoff/budget-tracked like every other provider (this proxy
+      // previously hit the arbitrary upstream on every CDN miss with no
+      // protection).
+      return cachedFetch<BadgeData>("https-proxy", `${endpointUrl}?${searchParams.toString()}`, async () => {
+        try {
+          const response = await raceTimeout(safeFetch(endpointUrl, {
+            headers: { Accept: "application/json", "User-Agent": "shieldcn/1.0" },
+          }))
+          // Failure verdicts carry `error: true` so they get short error cache
+          // headers and self-heal instead of being pinned at the CDN like a
+          // success.
+          if (!response) {
+            return { label: "endpoint", value: "timeout", color: "red", error: true }
+          }
+          if (!response.ok) {
+            return { label: "endpoint", value: `${response.status}`, color: "red", error: true }
+          }
+          const data = await response.json()
 
-        // Support both badgen format (subject/status) and our format
-        // (label/value). The endpoint is arbitrary user-supplied JSON — coerce
-        // to strings so an object can never paint "[object Object]" or crash
-        // the renderer, and accept legitimate falsy values like 0.
-        const asText = (v: unknown): string | undefined => {
-          if (v === null || v === undefined) return undefined
-          if (typeof v === "string") return v || undefined
-          if (typeof v === "number" || typeof v === "boolean") return String(v)
-          return undefined
-        }
-        const label = asText(data.label) ?? asText(data.subject) ?? "badge"
-        const value = asText(data.value) ?? asText(data.status) ?? asText(data.message) ?? "unknown"
-        const color = typeof data.color === "string" ? data.color : undefined
+          // Support both badgen format (subject/status) and our format
+          // (label/value). The endpoint is arbitrary user-supplied JSON — coerce
+          // to strings so an object can never paint "[object Object]" or crash
+          // the renderer, and accept legitimate falsy values like 0.
+          const asText = (v: unknown): string | undefined => {
+            if (v === null || v === undefined) return undefined
+            if (typeof v === "string") return v || undefined
+            if (typeof v === "number" || typeof v === "boolean") return String(v)
+            return undefined
+          }
+          const label = asText(data.label) ?? asText(data.subject) ?? "badge"
+          const value = asText(data.value) ?? asText(data.status) ?? asText(data.message) ?? "unknown"
+          const color = typeof data.color === "string" ? data.color : undefined
 
-        return { label, value, color } as BadgeData
-      } catch {
-        return { label: "endpoint", value: "error", color: "red", error: true }
-      }
+          return { label, value, color } as BadgeData
+        } catch (err) {
+          return {
+            label: "endpoint",
+            value: err instanceof UnsafeUrlError ? "blocked url"
+              : err instanceof ResponseTooLargeError ? "too large"
+              : "error",
+            color: "red",
+            error: true,
+          }
+        }
+      }, 300)
     }
 
     default:
@@ -1650,6 +1671,20 @@ async function handleBadgeGroup(
     return Response.json({ error: "no badges specified" }, { status: 400, headers: ERROR_CACHE_HEADERS })
   }
 
+  // Cap segment count — each one fans out to a parallel upstream fetch, so an
+  // unbounded group is a DoS-amplification vector (one request, N upstream
+  // hits).
+  const MAX_GROUP_SEGMENTS = 10
+  if (badgePaths.length > MAX_GROUP_SEGMENTS) {
+    const msg = `too many badges in group (max ${MAX_GROUP_SEGMENTS})`
+    if (format === "svg") {
+      return new Response(await renderErrorBadge("group", msg), {
+        headers: { "Content-Type": "image/svg+xml", ...ERROR_CACHE_HEADERS },
+      })
+    }
+    return Response.json({ error: msg }, { status: 400, headers: ERROR_CACHE_HEADERS })
+  }
+
   // JSON: return array of badge data
   if (format === "json") {
     let hadError = false
@@ -1665,7 +1700,16 @@ async function handleBadgeGroup(
   }
 
   // SVG/PNG: resolve each segment
-  const style = (searchParams.get("style") || searchParams.get("variant") || "default") as BadgeStyle
+  // Style applies uniformly across the whole group, so validate it against
+  // the first segment's provider as a representative check — same
+  // resolveVariant() the single-badge path uses, instead of an unchecked
+  // `as BadgeStyle` cast that let an invalid variant reach the renderer.
+  const firstSegs = badgePaths[0]!.split("/").filter(Boolean)
+  const style = resolveVariant(
+    firstSegs[0] ?? "",
+    firstSegs.slice(1),
+    searchParams.get("style") || searchParams.get("variant") || undefined,
+  )
   const size = (searchParams.get("size") || undefined) as BadgeSize | undefined
   const mode = (searchParams.get("mode") === "light" ? "light" : "dark") as "light" | "dark"
   const theme = searchParams.get("theme") ?? undefined
@@ -1804,29 +1848,7 @@ async function handleBadgeGroup(
 
   // PNG response
   if (format === "png") {
-    const { Resvg, initWasm } = await import("@resvg/resvg-wasm")
-    try {
-      let wasmLoaded = false
-      if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
-        try {
-          const fs = await import("node:fs")
-          const path = await import("node:path")
-          const candidates = [
-            path.join(process.cwd(), "node_modules", "@resvg", "resvg-wasm", "index_bg.wasm"),
-          ]
-          for (const p of candidates) {
-            if (fs.existsSync(p)) {
-              await initWasm(fs.readFileSync(p))
-              wasmLoaded = true
-              break
-            }
-          }
-        } catch { /* fs not available or file not found */ }
-      }
-      if (!wasmLoaded) {
-        await initWasm(fetch("https://unpkg.com/@resvg/resvg-wasm/index_bg.wasm"))
-      }
-    } catch { /* already initialized */ }
+    const { Resvg } = await ensureResvg()
     const resvg = new Resvg(svg)
     const png = resvg.render().asPng()
     return new Response(Buffer.from(png), {
@@ -2002,29 +2024,7 @@ async function handleChart(
   }
 
   if (format === "png") {
-    const { Resvg, initWasm } = await import("@resvg/resvg-wasm")
-    try {
-      let wasmLoaded = false
-      if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
-        try {
-          const fs = await import("node:fs")
-          const path = await import("node:path")
-          const candidates = [
-            path.join(process.cwd(), "node_modules", "@resvg", "resvg-wasm", "index_bg.wasm"),
-          ]
-          for (const p of candidates) {
-            if (fs.existsSync(p)) {
-              await initWasm(fs.readFileSync(p))
-              wasmLoaded = true
-              break
-            }
-          }
-        } catch { /* fs not available */ }
-      }
-      if (!wasmLoaded) {
-        await initWasm(fetch("https://unpkg.com/@resvg/resvg-wasm/index_bg.wasm"))
-      }
-    } catch { /* already initialized */ }
+    const { Resvg } = await ensureResvg()
     const resvg = new Resvg(svg)
     const png = resvg.render().asPng()
     return new Response(Buffer.from(png), {
@@ -2083,9 +2083,9 @@ async function resolveHeaderLogo(
   if (/^https?:\/\//.test(logoParam)) {
     try {
       const res = await raceTimeout(
-        fetch(logoParam, {
-          next: { revalidate: 86400 },
+        safeFetch(logoParam, {
           headers: { Accept: "image/svg+xml,image/png,image/*", "User-Agent": "shieldcn/1.0" },
+          maxBytes: MAX_HEADER_IMAGE_BYTES,
         }),
       )
       if (res?.ok) {
@@ -2097,10 +2097,11 @@ async function resolveHeaderLogo(
           return { imageDataUri: `data:image/svg+xml;base64,${Buffer.from(text).toString("base64")}` }
         }
         const bytes = Buffer.from(await res.arrayBuffer())
+        if (bytes.byteLength > MAX_HEADER_IMAGE_BYTES) return undefined
         return { imageDataUri: `data:${ct};base64,${bytes.toString("base64")}` }
       }
     } catch {
-      // No logo art — render without a logo.
+      // No logo art — render without a logo (blocked URL, too large, timeout, etc).
     }
     return undefined
   }
@@ -2164,9 +2165,9 @@ async function resolveHeaderImage(imageParam: string | null): Promise<string | u
 
   try {
     const res = await raceTimeout(
-      fetch(fetchUrl, {
-        next: { revalidate: 86400 },
+      safeFetch(fetchUrl, {
         headers: { Accept: "image/*", "User-Agent": "shieldcn/1.0" },
+        maxBytes: MAX_HEADER_IMAGE_BYTES,
       }),
     )
     if (!res?.ok) return undefined
@@ -2194,35 +2195,69 @@ const SPONSORS_RENDER_CAP = 80
 const SPONSORS_FRESH_TTL = 60 * 30 // 30 min fresh copy
 const SPONSORS_STALE_TTL = 60 * 60 * 24 * 7 // 7 day last-known-good fallback
 
+// ---------------------------------------------------------------------------
+// resvg-wasm init (shared across every PNG render path)
+// ---------------------------------------------------------------------------
+//
+// Every PNG-rendering call site used to run its own copy of this init logic,
+// re-running fs.existsSync/readFileSync (or re-fetching the CDN fallback)
+// on every single request even after the wasm module was already
+// initialized — initWasm() only needs to run once per process. ensureResvg()
+// memoizes that with a single module-level promise so concurrent/subsequent
+// calls reuse the already-initialized module instead of redoing the work.
+//
+// The CDN fallback URL is pinned to the exact installed @resvg/resvg-wasm
+// version (keep this in sync with the dependency in package.json) — an
+// unversioned unpkg URL would silently serve whatever is "latest" there,
+// which can drift out of sync with the installed JS bindings.
+const RESVG_WASM_VERSION = "2.6.2"
+const RESVG_WASM_CDN_URL = `https://unpkg.com/@resvg/resvg-wasm@${RESVG_WASM_VERSION}/index_bg.wasm`
+
+let resvgModulePromise: Promise<typeof import("@resvg/resvg-wasm")> | null = null
+
+async function ensureResvg(): Promise<typeof import("@resvg/resvg-wasm")> {
+  if (!resvgModulePromise) {
+    resvgModulePromise = (async () => {
+      const mod = await import("@resvg/resvg-wasm")
+      let wasmLoaded = false
+      if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
+        try {
+          const fs = await import("node:fs")
+          const path = await import("node:path")
+          // In standalone mode, WASM is copied to node_modules/@resvg/resvg-wasm/
+          const candidate = path.join(process.cwd(), "node_modules", "@resvg", "resvg-wasm", "index_bg.wasm")
+          if (fs.existsSync(candidate)) {
+            await mod.initWasm(fs.readFileSync(candidate))
+            wasmLoaded = true
+          }
+        } catch { /* fs not available or file not found */ }
+      }
+      if (!wasmLoaded) {
+        try {
+          await mod.initWasm(fetch(RESVG_WASM_CDN_URL))
+        } catch (err) {
+          // initWasm throws if the module is already initialized — that's fine.
+          // Anything else (e.g. a transient CDN fetch failure) must reject so
+          // the cache below is cleared and the next request retries.
+          if (!/already/i.test(String(err))) throw err
+        }
+      }
+      return mod
+    })()
+    // Never cache a failure: a rejected promise stored here would otherwise
+    // make every future PNG render fail until the process restarts.
+    resvgModulePromise.catch(() => { resvgModulePromise = null })
+  }
+  return resvgModulePromise
+}
+
 /**
  * Rasterize an SVG string to PNG bytes via resvg-wasm, with the bundled fonts
  * supplied so text (sponsor names, titles) renders in the wasm sandbox (which
  * has no system fonts). Mirrors the header PNG path.
  */
 async function rasterizeToPng(svg: string): Promise<Uint8Array> {
-  const { Resvg, initWasm } = await import("@resvg/resvg-wasm")
-  try {
-    let wasmLoaded = false
-    if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
-      try {
-        const fs = await import("node:fs")
-        const path = await import("node:path")
-        const candidates = [
-          path.join(process.cwd(), "node_modules", "@resvg", "resvg-wasm", "index_bg.wasm"),
-        ]
-        for (const p of candidates) {
-          if (fs.existsSync(p)) {
-            await initWasm(fs.readFileSync(p))
-            wasmLoaded = true
-            break
-          }
-        }
-      } catch { /* fs not available */ }
-    }
-    if (!wasmLoaded) {
-      await initWasm(fetch("https://unpkg.com/@resvg/resvg-wasm/index_bg.wasm"))
-    }
-  } catch { /* already initialized */ }
+  const { Resvg } = await ensureResvg()
   const { getFontBuffers, DEFAULT_FONT_FAMILY } = await import("./badges/fonts")
   const resvg = new Resvg(svg, {
     font: {
@@ -2814,40 +2849,10 @@ async function handleHeader(
   }
 
   if (format === "png") {
-    const { Resvg, initWasm } = await import("@resvg/resvg-wasm")
-    try {
-      let wasmLoaded = false
-      if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
-        try {
-          const fs = await import("node:fs")
-          const path = await import("node:path")
-          const candidates = [
-            path.join(process.cwd(), "node_modules", "@resvg", "resvg-wasm", "index_bg.wasm"),
-          ]
-          for (const p of candidates) {
-            if (fs.existsSync(p)) {
-              await initWasm(fs.readFileSync(p))
-              wasmLoaded = true
-              break
-            }
-          }
-        } catch { /* fs not available */ }
-      }
-      if (!wasmLoaded) {
-        await initWasm(fetch("https://unpkg.com/@resvg/resvg-wasm/index_bg.wasm"))
-      }
-    } catch { /* already initialized */ }
-    // Headers are text-centric: supply the bundled fonts so resvg can
-    // rasterize the title/subtitle (the wasm sandbox has no system fonts).
-    const { getFontBuffers, DEFAULT_FONT_FAMILY } = await import("./badges/fonts")
-    const resvg = new Resvg(svg, {
-      font: {
-        fontBuffers: getFontBuffers(),
-        defaultFontFamily: DEFAULT_FONT_FAMILY,
-        loadSystemFonts: false,
-      },
-    })
-    const png = resvg.render().asPng()
+    // Headers are text-centric: rasterizeToPng() supplies the bundled fonts
+    // so resvg can render the title/subtitle (the wasm sandbox has no
+    // system fonts).
+    const png = await rasterizeToPng(svg)
     return new Response(Buffer.from(png), {
       headers: { "Content-Type": "image/png", ...CACHE_HEADERS },
     })
@@ -3067,8 +3072,7 @@ async function resolveChartData(
         return { ok: false, status: 400, msg: "json url charts need a ?query=" }
       }
       try {
-        const res = await raceTimeout(fetch(url, {
-          next: { revalidate: 300 },
+        const res = await raceTimeout(safeFetch(url, {
           headers: { Accept: "application/json", "User-Agent": "shieldcn/1.0" },
         }))
         if (!res || !res.ok) {
@@ -3554,26 +3558,16 @@ async function handleBadgeGETInner(
   // Override label if provided
   const label = searchParams.get("label") || data.label
 
-  // Parse configurable layout params. Each is clamped to a sane range — an
-  // unbounded ?height=1e9 would otherwise balloon the Satori render, and
-  // negative values break layout.
-  const NUM_BOUNDS: Record<string, [number, number]> = {
-    labelOpacity: [0, 1],
-    height: [8, 240],
-    fontSize: [5, 120],
-    radius: [0, 120],
-    padX: [0, 120],
-    iconSize: [0, 120],
-    gap: [0, 60],
-    labelGap: [0, 60],
-  }
+  // Parse configurable layout params. Each is clamped against the same
+  // BADGE_DIM_BOUNDS the renderer itself enforces (single source of truth —
+  // see render.tsx) — an unbounded ?height=1e9 would otherwise balloon the
+  // Satori render, and negative values break layout.
   function num(key: string): number | undefined {
     const v = searchParams.get(key)
     if (v === null) return undefined
     const n = parseFloat(v)
     if (!Number.isFinite(n)) return undefined
-    const [min, max] = NUM_BOUNDS[key] ?? [0, 1000]
-    return Math.min(max, Math.max(min, n))
+    return clampBadgeDim(key, n)
   }
 
   // Parse gradient
@@ -3719,32 +3713,7 @@ async function handleBadgeGETInner(
 
   // PNG response
   if (format === "png") {
-    const { Resvg, initWasm } = await import("@resvg/resvg-wasm")
-    try {
-      // Try loading WASM from a local file first (Docker/standalone),
-      // fall back to CDN fetch (Vercel/dev)
-      let wasmLoaded = false
-      if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
-        try {
-          const fs = await import("node:fs")
-          const path = await import("node:path")
-          // In standalone mode, WASM is copied to node_modules/@resvg/resvg-wasm/
-          const candidates = [
-            path.join(process.cwd(), "node_modules", "@resvg", "resvg-wasm", "index_bg.wasm"),
-          ]
-          for (const p of candidates) {
-            if (fs.existsSync(p)) {
-              await initWasm(fs.readFileSync(p))
-              wasmLoaded = true
-              break
-            }
-          }
-        } catch { /* fs not available or file not found */ }
-      }
-      if (!wasmLoaded) {
-        await initWasm(fetch("https://unpkg.com/@resvg/resvg-wasm/index_bg.wasm"))
-      }
-    } catch { /* already initialized */ }
+    const { Resvg } = await ensureResvg()
     const resvg = new Resvg(svg)
     const png = resvg.render().asPng()
 
@@ -3777,30 +3746,120 @@ async function handleBadgeGETInner(
 export async function handleBadgePUT(
   request: Request,
   slug: string[],
+  options?: BadgeRequestOptions,
 ) {
+  try {
+    return await handleBadgePUTInner(request, slug, options)
+  } catch (error) {
+    // Mirror handleBadgeGET's outer catch: a memo write should never surface
+    // an unhandled 500 without at least being reported.
+    if (options?.onError) {
+      try {
+        options.onError(error, { path: slug.join("/") })
+      } catch { /* never let reporting break the response */ }
+    }
+    return Response.json({ error: "internal error" }, { status: 500 })
+  }
+}
+
+async function handleBadgePUTInner(
+  request: Request,
+  slug: string[],
+  options?: BadgeRequestOptions,
+) {
+  function emit(outcome: string) {
+    options?.onMetric?.({ type: "counter", name: "memo.write", value: 1, tags: { outcome } })
+  }
+
   if (slug[0] !== "memo" || slug.length < 4) {
+    emit("bad_request")
     return Response.json({ error: "Invalid memo URL. Use PUT /memo/{key}/{label}/{value}/{color}" }, { status: 400 })
+  }
+
+  const limit = await checkRateLimit("memo-put", getClientIdentifier(request), { max: 20, windowMs: 60_000 })
+  if (!limit.allowed) {
+    emit("rate_limited")
+    return Response.json(
+      { error: "Too many memo badge writes. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(Math.ceil(limit.resetMs / 1000)) } },
+    )
   }
 
   const auth = request.headers.get("authorization")
   if (!auth?.startsWith("Bearer ")) {
+    emit("unauthorized")
     return Response.json({ error: "Missing Authorization: Bearer <token> header" }, { status: 401 })
   }
   const token = auth.slice(7)
   if (!token) {
+    emit("unauthorized")
     return Response.json({ error: "Empty bearer token" }, { status: 401 })
   }
 
   const key = slug[1]
-  const label = decodeURIComponent(slug[2])
-  const value = decodeURIComponent(slug[3])
-  const color = slug[4] ? decodeURIComponent(slug[4]) : undefined
+  if (key.length > 200) {
+    emit("bad_request")
+    return Response.json({ error: "Memo key too long (max 200 characters)" }, { status: 400 })
+  }
 
+  let label: string
+  let value: string
+  let color: string | undefined
+  try {
+    label = decodeURIComponent(slug[2])
+    value = decodeURIComponent(slug[3])
+    color = slug[4] ? decodeURIComponent(slug[4]) : undefined
+  } catch {
+    emit("bad_request")
+    return Response.json({ error: "Invalid URL encoding in memo label, value, or color" }, { status: 400 })
+  }
+
+  const MAX_FIELD_LENGTH = 100
+  if (label.length > MAX_FIELD_LENGTH || value.length > MAX_FIELD_LENGTH || (color && color.length > MAX_FIELD_LENGTH)) {
+    emit("bad_request")
+    return Response.json({ error: `Memo label, value, and color must each be ${MAX_FIELD_LENGTH} characters or fewer` }, { status: 400 })
+  }
+
+  // upsertMemoBadge never throws — it catches internally and returns
+  // { ok: false, error } — so no try/catch is needed here.
   const result = await upsertMemoBadge(key, label, value, color, token)
 
   if (!result.ok) {
+    emit("forbidden")
     return Response.json({ error: result.error }, { status: 403 })
   }
 
+  emit("ok")
   return Response.json({ ok: true, key, label, value, color, expiresIn: "32 days" })
+}
+
+/**
+ * Standard Next.js route-segment params shape for a `[...slug]` catch-all —
+ * matches what `app/[...slug]/route.ts` receives as its second argument.
+ */
+interface SlugRouteContext {
+  params: Promise<{ slug: string[] }>
+}
+
+/**
+ * Builds the `{ GET, PUT }` handlers for a `[...slug]/route.ts` catch-all,
+ * wiring both to the same `BadgeRequestOptions`. web and engine previously
+ * duplicated the `params` unwrapping and the "call handleBadgeGET/PUT with
+ * this app's callbacks" glue verbatim in each route file (and engine's PUT
+ * silently dropped `onError`/`onMetric` because there was nothing forcing it
+ * to stay in sync with GET). Each app still supplies its own `onError`/
+ * `onMetric` (typically wired to Sentry) — core stays dependency-free, per
+ * {@link BadgeRequestOptions}.
+ */
+export function createBadgeHandlers(options: BadgeRequestOptions = {}) {
+  return {
+    async GET(request: Request, { params }: SlugRouteContext) {
+      const { slug } = await params
+      return handleBadgeGET(request, slug, options)
+    },
+    async PUT(request: Request, { params }: SlugRouteContext) {
+      const { slug } = await params
+      return handleBadgePUT(request, slug, options)
+    },
+  }
 }

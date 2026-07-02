@@ -28,14 +28,19 @@ export function getPool(): Pool {
       connectionTimeoutMillis: 10_000,
       keepAlive: true,
       // Enable SSL for known cloud providers or explicit sslmode=require.
-      // Docker/local Postgres connections default to no SSL.
+      // Docker/local Postgres connections default to no SSL. Certificate
+      // verification is left ON (the pg default) — Neon/Railway/Supabase all
+      // present publicly CA-signed certs, so there's no reason to accept a
+      // MITM'd connection here. A self-hosted deployment terminating TLS with
+      // a private CA should add it via the standard NODE_EXTRA_CA_CERTS env
+      // var rather than disabling verification.
       ssl: connString && (
         connString.includes("sslmode=require")
         || connString.includes("neon")
         || connString.includes("railway")
         || connString.includes("supabase")
       )
-        ? { rejectUnauthorized: false }
+        ? true
         : undefined,
     })
     // node-postgres emits 'error' on idle clients that the server drops (exactly
@@ -112,12 +117,18 @@ export async function initDB() {
       id SERIAL PRIMARY KEY,
       github_user TEXT NOT NULL UNIQUE,
       access_token TEXT NOT NULL,
+      token_hash TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       last_used_at TIMESTAMPTZ,
       is_valid BOOLEAN DEFAULT TRUE
     );
+    -- token_hash didn't exist on earlier deployments — add it if migrating an
+    -- existing table (CREATE TABLE IF NOT EXISTS above is a no-op for those).
+    ALTER TABLE github_tokens ADD COLUMN IF NOT EXISTS token_hash TEXT;
     CREATE INDEX IF NOT EXISTS idx_github_tokens_valid
       ON github_tokens (is_valid) WHERE is_valid = TRUE;
+    CREATE INDEX IF NOT EXISTS idx_github_tokens_hash
+      ON github_tokens (token_hash) WHERE token_hash IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS gen_counter (
       id TEXT PRIMARY KEY DEFAULT 'badges',

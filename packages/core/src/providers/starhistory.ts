@@ -19,7 +19,7 @@
 
 import { pickToken, invalidateToken } from "../token-pool"
 import { isBackedOff, recordBackoff, clearBackoff, cachedFetchStale } from "../cache"
-import { raceTimeout } from "../provider-fetch"
+import { raceTimeout, isRateLimitResponse } from "../provider-fetch"
 
 /** A single point on a cumulative curve. */
 export interface StarPoint {
@@ -44,16 +44,6 @@ const MAX_POINTS = 30
 /** GitHub caps stargazer pagination at 400 pages (40k stars). */
 const MAX_PAGE = 400
 
-/** Same rate-limit detection as the main GitHub client. */
-function isRateLimitResponse(response: Response): boolean {
-  if (response.status === 429) return true
-  return (
-    response.status === 403 &&
-    (response.headers.get("x-ratelimit-remaining") === "0" ||
-      response.headers.get("retry-after") !== null)
-  )
-}
-
 /**
  * Fetch a GitHub URL through the token pool. `accept` lets the caller request
  * the `star+json` media type (needed for `starred_at` timestamps).
@@ -63,7 +53,7 @@ async function ghFetch(
   accept: string,
   revalidate: number,
 ): Promise<Response | null> {
-  if (isBackedOff("github")) return null
+  if (await isBackedOff("github")) return null
   try {
     const token = await pickToken()
     const doFetch = (auth?: string) =>
@@ -87,11 +77,11 @@ async function ghFetch(
     }
 
     if (isRateLimitResponse(response) || response.status === 503) {
-      recordBackoff("github", response.status)
+      await recordBackoff("github", response.status)
       return null
     }
     if (!response.ok) return null
-    clearBackoff("github")
+    await clearBackoff("github")
     return response
   } catch {
     return null
@@ -104,7 +94,7 @@ async function fetchStarPage(
   repo: string,
   page: number,
 ): Promise<string[] | null> {
-  const url = `https://api.github.com/repos/${owner}/${repo}/stargazers?per_page=100&page=${page}`
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/stargazers?per_page=100&page=${page}`
   const res = await ghFetch(url, "application/vnd.github.v3.star+json", 60 * 60 * 6)
   if (!res) return null
   try {
@@ -135,7 +125,7 @@ async function buildStarHistory(
 ): Promise<StarHistory | null> {
   // 1. Repo metadata → total stars.
   const repoRes = await ghFetch(
-    `https://api.github.com/repos/${owner}/${repo}`,
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
     "application/vnd.github.v3+json",
     60 * 60,
   )

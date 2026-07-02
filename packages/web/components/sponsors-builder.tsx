@@ -11,7 +11,7 @@
 "use client"
 
 import { useState, useCallback, useMemo, useSyncExternalStore } from "react"
-import { Copy, Check, Shuffle, AlignLeft, AlignCenter, AlignRight } from "lucide-react"
+import { Shuffle, AlignLeft, AlignCenter, AlignRight } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -25,6 +25,9 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Checkbox as ShadcnCheckbox } from "@/components/ui/checkbox"
+import { CopyOutputSection } from "@/components/copy-output-section"
+import { useCopyToClipboard } from "@/lib/use-copy-to-clipboard"
+import { formatImageOutput, IMAGE_COPY_FORMATS, type ImageCopyFormat } from "@/lib/builder-output"
 import { cn } from "@/lib/utils"
 import {
   SPONSORS_DEFAULTS,
@@ -39,27 +42,8 @@ import {
   type SponsorsState,
 } from "@/lib/sponsors-builder-shared"
 
-type CopyFormat = "markdown" | "html" | "url"
-
-function formatOutput(url: string, format: CopyFormat, alt: string): string {
-  switch (format) {
-    case "markdown":
-      return `![${alt}](${url})`
-    case "html":
-      return `<img alt="${alt}" src="${url}">`
-    case "url":
-      return url
-  }
-}
-
-const COPY_FORMATS: { value: CopyFormat; label: string }[] = [
-  { value: "markdown", label: "Markdown" },
-  { value: "html", label: "HTML" },
-  { value: "url", label: "URL" },
-]
-
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return <Label className="text-xs text-muted-foreground">{children}</Label>
+function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
+  return <Label htmlFor={htmlFor} className="text-xs text-muted-foreground">{children}</Label>
 }
 
 type Align = "left" | "center" | "right"
@@ -85,9 +69,8 @@ function AlignField({ label, value, onChange }: { label: string; value: Align; o
 
 export function SponsorsBuilder() {
   const [s, setS] = useState<SponsorsState>(SPONSORS_DEFAULTS)
-  const [copied, setCopied] = useState(false)
-  const [copyError, setCopyError] = useState(false)
-  const [copyFormat, setCopyFormat] = useState<CopyFormat>("markdown")
+  const [copyFormat, setCopyFormat] = useState<ImageCopyFormat>("markdown")
+  const { copied, copyError, copy } = useCopyToClipboard()
   const { resolvedTheme } = useTheme()
 
   // Read the origin on the client without a setState-in-effect (hydration-safe).
@@ -105,21 +88,7 @@ export function SponsorsBuilder() {
 
   const url = useMemo(() => buildSponsorsUrl({ ...s, mode }, baseUrl), [s, mode, baseUrl])
   const altText = `${s.login || "shadcn"} sponsors`
-  const output = useMemo(() => formatOutput(url, copyFormat, altText), [url, copyFormat, altText])
-
-  const handleCopy = useCallback(() => {
-    if (!output) return
-    navigator.clipboard.writeText(output).then(
-      () => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 2000)
-      },
-      () => {
-        setCopyError(true)
-        setTimeout(() => setCopyError(false), 2000)
-      },
-    )
-  }, [output])
+  const output = useMemo(() => formatImageOutput(url, copyFormat, altText), [url, copyFormat, altText])
 
   return (
     <div className="grid gap-6 lg:grid-cols-[340px_minmax(0,1fr)]">
@@ -147,42 +116,16 @@ export function SponsorsBuilder() {
         </div>
 
         {/* Copy output */}
-        <div className="space-y-3">
-          <ToggleGroup
-            type="single"
-            value={copyFormat}
-            onValueChange={(v) => v && setCopyFormat(v as CopyFormat)}
-            variant="outline"
-            size="sm"
-            className="w-full max-w-md"
-          >
-            {COPY_FORMATS.map((f) => (
-              <ToggleGroupItem key={f.value} value={f.value} className="flex-1 text-xs">
-                {f.label}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <div className="flex items-start gap-2">
-            <code className="flex-1 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-[11px] font-mono break-all text-muted-foreground leading-relaxed min-h-[2.5rem]">
-              {output}
-            </code>
-            <Button variant="outline" size="sm" onClick={handleCopy} className="shrink-0 h-9">
-              {copied ? (
-                <>
-                  <Check className="size-3.5 text-success" /> Copied
-                </>
-              ) : copyError ? (
-                <>
-                  <Copy className="size-3.5 text-destructive" /> Failed
-                </>
-              ) : (
-                <>
-                  <Copy className="size-3.5" /> Copy
-                </>
-              )}
-            </Button>
-          </div>
-        </div>
+        <CopyOutputSection
+          formats={IMAGE_COPY_FORMATS}
+          format={copyFormat}
+          onFormatChange={setCopyFormat}
+          output={output}
+          copied={copied}
+          copyError={copyError}
+          onCopy={() => copy(output)}
+          toggleClassName="max-w-md"
+        />
       </div>
 
       {/* ─── Controls sidebar (left on desktop) ─── */}
@@ -190,8 +133,9 @@ export function SponsorsBuilder() {
         {/* Login + title */}
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <FieldLabel>GitHub login (user or org)</FieldLabel>
+            <FieldLabel htmlFor="sponsors-login">GitHub login (user or org)</FieldLabel>
             <Input
+              id="sponsors-login"
               value={s.login}
               onChange={(e) => set("login", e.target.value)}
               placeholder="shadcn"
@@ -199,8 +143,9 @@ export function SponsorsBuilder() {
             />
           </div>
           <div className="space-y-1.5">
-            <FieldLabel>Title (empty to hide)</FieldLabel>
+            <FieldLabel htmlFor="sponsors-title">Title (empty to hide)</FieldLabel>
             <Input
+              id="sponsors-title"
               value={s.title}
               onChange={(e) => set("title", e.target.value)}
               placeholder="Sponsors"
@@ -226,8 +171,9 @@ export function SponsorsBuilder() {
             </span>
           </label>
           <div className="space-y-1.5">
-            <FieldLabel>Special sponsors (comma-separated logins)</FieldLabel>
+            <FieldLabel htmlFor="sponsors-special">Special sponsors (comma-separated logins)</FieldLabel>
             <Input
+              id="sponsors-special"
               value={s.special}
               onChange={(e) => set("special", e.target.value)}
               placeholder={s.featured ? "auto from Featured sponsors" : "vercel, clerk"}
@@ -235,8 +181,9 @@ export function SponsorsBuilder() {
             />
           </div>
           <div className="space-y-1.5">
-            <FieldLabel>Backers (comma-separated logins)</FieldLabel>
+            <FieldLabel htmlFor="sponsors-backers">Backers (comma-separated logins)</FieldLabel>
             <Input
+              id="sponsors-backers"
               value={s.backers}
               onChange={(e) => set("backers", e.target.value)}
               placeholder="octocat"
@@ -269,9 +216,10 @@ export function SponsorsBuilder() {
 
         {/* Background image */}
         <div className="space-y-2">
-          <FieldLabel>Background image</FieldLabel>
+          <FieldLabel htmlFor="sponsors-bg-image">Background image</FieldLabel>
           <div className="flex gap-2">
             <Input
+              id="sponsors-bg-image"
               value={s.image}
               onChange={(e) => set("image", e.target.value)}
               placeholder="Unsplash or image URL"
@@ -291,8 +239,8 @@ export function SponsorsBuilder() {
           </div>
           {s.image ? (
             <div className="space-y-1.5">
-              <FieldLabel>Overlay (0–1)</FieldLabel>
-              <Input value={s.overlay} onChange={(e) => set("overlay", e.target.value)} placeholder="0.45" className="h-9" />
+              <FieldLabel htmlFor="sponsors-overlay">Overlay (0–1)</FieldLabel>
+              <Input id="sponsors-overlay" value={s.overlay} onChange={(e) => set("overlay", e.target.value)} placeholder="0.45" className="h-9" />
             </div>
           ) : null}
         </div>
@@ -302,7 +250,7 @@ export function SponsorsBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Avatar size</FieldLabel>
             <Select value={s.size} onValueChange={(v) => set("size", v as SponsorsState["size"])}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Avatar size" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -317,7 +265,7 @@ export function SponsorsBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Theme</FieldLabel>
             <Select value={s.theme || "_none"} onValueChange={(v) => set("theme", v === "_none" ? "" : v)}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Sponsors theme" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -331,8 +279,9 @@ export function SponsorsBuilder() {
             </Select>
           </div>
           <div className="space-y-1.5">
-            <FieldLabel>Limit</FieldLabel>
+            <FieldLabel htmlFor="sponsors-limit">Limit</FieldLabel>
             <Input
+              id="sponsors-limit"
               value={s.limit}
               onChange={(e) => set("limit", e.target.value)}
               placeholder="60"
@@ -343,7 +292,7 @@ export function SponsorsBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Font</FieldLabel>
             <Select value={s.font} onValueChange={(v) => set("font", v)}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Sponsors font" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -368,7 +317,7 @@ export function SponsorsBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Tier separator</FieldLabel>
             <Select value={s.separator} onValueChange={(v) => set("separator", v as SponsorsState["separator"])}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Tier separator" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

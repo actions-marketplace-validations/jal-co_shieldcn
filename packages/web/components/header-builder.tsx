@@ -11,12 +11,11 @@
 "use client"
 
 import { useState, useCallback, useMemo, useSyncExternalStore } from "react"
-import { Copy, Check, Shuffle } from "lucide-react"
+import { Shuffle } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   Select,
   SelectContent,
@@ -28,6 +27,9 @@ import { Checkbox as ShadcnCheckbox } from "@/components/ui/checkbox"
 import { LogoPicker } from "@/components/logo-picker"
 import { SvgIconUpload } from "@/components/svg-icon-upload"
 import { ColorSwatch } from "@/components/color-input"
+import { CopyOutputSection } from "@/components/copy-output-section"
+import { useCopyToClipboard } from "@/lib/use-copy-to-clipboard"
+import { formatImageOutput, IMAGE_COPY_FORMATS, type ImageCopyFormat } from "@/lib/builder-output"
 import { cn } from "@/lib/utils"
 import {
   HEADER_DEFAULTS,
@@ -42,34 +44,14 @@ import {
   type HeaderState,
 } from "@/lib/header-builder-shared"
 
-type CopyFormat = "markdown" | "html" | "url"
-
-function formatOutput(url: string, format: CopyFormat, alt: string): string {
-  switch (format) {
-    case "markdown":
-      return `![${alt}](${url})`
-    case "html":
-      return `<img alt="${alt}" src="${url}">`
-    case "url":
-      return url
-  }
-}
-
-const COPY_FORMATS: { value: CopyFormat; label: string }[] = [
-  { value: "markdown", label: "Markdown" },
-  { value: "html", label: "HTML" },
-  { value: "url", label: "URL" },
-]
-
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return <Label className="text-xs text-muted-foreground">{children}</Label>
+function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
+  return <Label htmlFor={htmlFor} className="text-xs text-muted-foreground">{children}</Label>
 }
 
 export function HeaderBuilder() {
   const [s, setS] = useState<HeaderState>(HEADER_DEFAULTS)
-  const [copied, setCopied] = useState(false)
-  const [copyError, setCopyError] = useState(false)
-  const [copyFormat, setCopyFormat] = useState<CopyFormat>("markdown")
+  const [copyFormat, setCopyFormat] = useState<ImageCopyFormat>("markdown")
+  const { copied, copyError, copy } = useCopyToClipboard()
   const { resolvedTheme } = useTheme()
 
   // Read the origin on the client without a setState-in-effect (hydration-safe).
@@ -87,21 +69,7 @@ export function HeaderBuilder() {
 
   const url = useMemo(() => buildHeaderUrl({ ...s, mode }, baseUrl), [s, mode, baseUrl])
   const altText = s.title || "repository header"
-  const output = useMemo(() => formatOutput(url, copyFormat, altText), [url, copyFormat, altText])
-
-  const handleCopy = useCallback(() => {
-    if (!output) return
-    navigator.clipboard.writeText(output).then(
-      () => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 2000)
-      },
-      () => {
-        setCopyError(true)
-        setTimeout(() => setCopyError(false), 2000)
-      },
-    )
-  }, [output])
+  const output = useMemo(() => formatImageOutput(url, copyFormat, altText), [url, copyFormat, altText])
 
   return (
     <div className="grid gap-6 lg:grid-cols-[340px_minmax(0,1fr)]">
@@ -129,42 +97,16 @@ export function HeaderBuilder() {
         </div>
 
         {/* Copy output */}
-        <div className="space-y-3">
-          <ToggleGroup
-            type="single"
-            value={copyFormat}
-            onValueChange={(v) => v && setCopyFormat(v as CopyFormat)}
-            variant="outline"
-            size="sm"
-            className="w-full max-w-md"
-          >
-            {COPY_FORMATS.map((f) => (
-              <ToggleGroupItem key={f.value} value={f.value} className="flex-1 text-xs">
-                {f.label}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <div className="flex items-start gap-2">
-            <code className="flex-1 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-[11px] font-mono break-all text-muted-foreground leading-relaxed min-h-[2.5rem]">
-              {output}
-            </code>
-            <Button variant="outline" size="sm" onClick={handleCopy} className="shrink-0 h-9">
-              {copied ? (
-                <>
-                  <Check className="size-3.5 text-success" /> Copied
-                </>
-              ) : copyError ? (
-                <>
-                  <Copy className="size-3.5 text-destructive" /> Failed
-                </>
-              ) : (
-                <>
-                  <Copy className="size-3.5" /> Copy
-                </>
-              )}
-            </Button>
-          </div>
-        </div>
+        <CopyOutputSection
+          formats={IMAGE_COPY_FORMATS}
+          format={copyFormat}
+          onFormatChange={setCopyFormat}
+          output={output}
+          copied={copied}
+          copyError={copyError}
+          onCopy={() => copy(output)}
+          toggleClassName="max-w-md"
+        />
       </div>
 
       {/* ─── Controls sidebar (left on desktop) ─── */}
@@ -194,8 +136,9 @@ export function HeaderBuilder() {
         {/* Title + subtitle */}
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <FieldLabel>Title</FieldLabel>
+            <FieldLabel htmlFor="header-title">Title</FieldLabel>
             <Input
+              id="header-title"
               value={s.title}
               onChange={(e) => set("title", e.target.value)}
               placeholder="Your Project"
@@ -203,8 +146,9 @@ export function HeaderBuilder() {
             />
           </div>
           <div className="space-y-1.5">
-            <FieldLabel>Subtitle</FieldLabel>
+            <FieldLabel htmlFor="header-subtitle">Subtitle</FieldLabel>
             <Input
+              id="header-subtitle"
               value={s.subtitle}
               onChange={(e) => set("subtitle", e.target.value)}
               placeholder="A short tagline"
@@ -221,6 +165,7 @@ export function HeaderBuilder() {
               <LogoPicker
                 value={/^(data:|https?:\/\/)/.test(s.logo) ? "" : s.logo}
                 onChange={(v) => set("logo", v)}
+                ariaLabel="Header logo icon"
               />
             </div>
             <ColorSwatch label="Logo color" value={s.logoColor} onChange={(v) => set("logoColor", v)} />
@@ -230,9 +175,10 @@ export function HeaderBuilder() {
 
         {/* Background image */}
         <div className="space-y-2">
-          <FieldLabel>Background image</FieldLabel>
+          <FieldLabel htmlFor="header-bg-image">Background image</FieldLabel>
           <div className="flex gap-2">
             <Input
+              id="header-bg-image"
               value={s.image}
               onChange={(e) => set("image", e.target.value)}
               placeholder="Unsplash or image URL"
@@ -252,8 +198,8 @@ export function HeaderBuilder() {
           </div>
           {s.image ? (
             <div className="space-y-1.5">
-              <FieldLabel>Overlay (0–1)</FieldLabel>
-              <Input value={s.overlay} onChange={(e) => set("overlay", e.target.value)} placeholder="0.45" className="h-9" />
+              <FieldLabel htmlFor="header-overlay">Overlay (0–1)</FieldLabel>
+              <Input id="header-overlay" value={s.overlay} onChange={(e) => set("overlay", e.target.value)} placeholder="0.45" className="h-9" />
             </div>
           ) : null}
         </div>
@@ -263,7 +209,7 @@ export function HeaderBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Size</FieldLabel>
             <Select value={s.size} onValueChange={(v) => set("size", v as HeaderState["size"])}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Header size" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -278,7 +224,7 @@ export function HeaderBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Theme</FieldLabel>
             <Select value={s.theme || "_none"} onValueChange={(v) => set("theme", v === "_none" ? "" : v)}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Header theme" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -294,7 +240,7 @@ export function HeaderBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Align</FieldLabel>
             <Select value={s.align} onValueChange={(v) => set("align", v as HeaderState["align"])}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Header text alignment" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -306,7 +252,7 @@ export function HeaderBuilder() {
           <div className="space-y-1.5">
             <FieldLabel>Font</FieldLabel>
             <Select value={s.font} onValueChange={(v) => set("font", v)}>
-              <SelectTrigger className="h-9 w-full text-sm">
+              <SelectTrigger aria-label="Header font" className="h-9 w-full text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

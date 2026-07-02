@@ -16,6 +16,7 @@ async function lemmyFetch(instance: string, community: string): Promise<Record<s
     cacheKey: `community:${instance}:${community}`,
     url: `https://${instance}/api/v3/community?name=${encodeURIComponent(community)}`,
     ttl: 3600,
+    userControlledHost: true,
   })
 }
 
@@ -34,7 +35,7 @@ export async function getLemmySubscribers(instance: string, community: string): 
   return {
     label: `!${community}`,
     value: `${formatCount(counts.subscribers ?? 0)} subscribers`,
-    link: `https://${instance}/c/${community}`,
+    link: `https://${instance}/c/${encodeURIComponent(community)}`,
   }
 }
 
@@ -53,7 +54,7 @@ export async function getLemmyPosts(instance: string, community: string): Promis
   return {
     label: `!${community}`,
     value: `${formatCount(counts.posts ?? 0)} posts`,
-    link: `https://${instance}/c/${community}`,
+    link: `https://${instance}/c/${encodeURIComponent(community)}`,
   }
 }
 
@@ -72,6 +73,6 @@ export async function getLemmyComments(instance: string, community: string): Pro
   return {
     label: `!${community}`,
     value: `${formatCount(counts.comments ?? 0)} comments`,
-    link: `https://${instance}/c/${community}`,
+    link: `https://${instance}/c/${encodeURIComponent(community)}`,
   }
 }

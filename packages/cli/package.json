@@ -12,7 +12,10 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm build"
   },
   "keywords": [
     "badges",
@@ -44,8 +47,10 @@
     "yaml": "^2.7.1"
   },
   "devDependencies": {
+    "@types/node": "^20",
     "tsup": "^8.5.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3"
   },
   "engines": {
     "node": ">=18"

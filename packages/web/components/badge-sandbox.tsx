@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useId, useMemo, useSyncExternalStore } from "react"
 import { Copy, Check, Play } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ColorInput } from "@/components/color-input"
@@ -195,9 +196,13 @@ export function BadgeSandbox({
 
   const handleCopy = useCallback(() => {
     if (!formattedOutput) return
-    navigator.clipboard.writeText(formattedOutput)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    navigator.clipboard.writeText(formattedOutput).then(
+      () => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      },
+      () => toast.error("Couldn't copy to clipboard"),
+    )
   }, [formattedOutput])
 
   const sizeHeight = { xs: "h-6", sm: "h-8", default: "h-9", lg: "h-10" }[size] || "h-8"
@@ -329,7 +334,7 @@ export function BadgeSandbox({
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <SField label="logo">
             <div className="space-y-1.5">
-              <LogoPicker value={logo.startsWith("data:") ? "" : logo} onChange={setLogo} />
+              <LogoPicker value={logo.startsWith("data:") ? "" : logo} onChange={setLogo} ariaLabel="Badge logo icon" />
               <SvgIconUpload value={logo} onChange={setLogo} className="w-full" />
             </div>
           </SField>
