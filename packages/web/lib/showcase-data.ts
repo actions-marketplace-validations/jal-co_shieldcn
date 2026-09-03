@@ -396,6 +396,13 @@ export const categories: Category[] = [
       dynamicBadge("Convex", "by @get-convex", "/badge/Convex-F3B01C.svg?logo=convex", "Branded Convex badge using Simple Icons. Best for stack rows, integration lists, and polished README sections."),
     
       dynamicBadge("Telegram", "by @chirizxc", "/badge/Telegram-24A1DE.svg?font=geist-mono&logo=telegram&logoColor=ffffff", "Community badge submitted by chirizxc."),
+    
+      dynamicBadge("buy me a coffee", "by @feeeedox", "/badge/buy%20me%20a%20coffee-c6be40.svg?logo=buymeacoffee", "Community badge submitted by feeeedox."),
+      dynamicBadge("Built By Humans", "by @feeeedox", "/badge/built%20by-humans.svg?variant=outline&theme=red&logo=ri%3AFaHeart&logoColor=ef4444", "Define a project is built by humans without AI assistance"),
+    
+      dynamicBadge("uv", "by @chirizxc", "/badge/uv-D7FF64.svg?mode=light&logo=uv", "https://github.com/astral-sh/uv"),
+    
+      dynamicBadge("Ruff v2", "by @chirizxc", "/badge/Ruff-D7FE64.svg?font=geist&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiIgd2lkdGg9IjFlbSIgaGVpZ2h0PSIxZW0iPjxwYXRoIGZpbGw9IiNkN2ZmNjQiIGQ9Ik0zMCA0LjhBMi44IDIuOCAwIDAgMCAyNy4yIDJIMnYyOGgxMi44OHYtOC40aDIuMjRWMzBIMzBWMTkuMzZoLTUuNnYtMi4yNGgyLjhhMi44IDIuOCAwIDAgMCAyLjgtMi44ek0xOS4zNiAxNC44OGgtNi43MnYtMi4yNGg2LjcyeiIvPjwvc3ZnPg%3D%3D", "https://github.com/astral-sh/ruff"),
     ],
   },
 ]
